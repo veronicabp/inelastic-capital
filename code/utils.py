@@ -8,14 +8,21 @@ import re
 from itertools import product
 
 import statsmodels.api as sm
-from scipy.stats.mstats import winsorize
 from linearmodels.panel import PanelOLS
 import pyfixest as pf
 from pyfixest import feols
+from scipy.stats.mstats import winsorize
+from stargazer.stargazer import Stargazer
 
 from tqdm import tqdm
 
 from importlib import reload
+
+import warnings
+from linearmodels.panel.model import MissingValueWarning
+
+warnings.filterwarnings("ignore", category=MissingValueWarning)
+
 
 figures_path = "/Users/vbp/Downloads"
 
@@ -125,6 +132,7 @@ def load_sic_hs_crosswalk(data_folder):
     merge_keys["sic"] = pd.to_numeric(merge_keys.sic, errors="coerce")
     merge_keys = merge_keys.dropna()
 
+    merge_keys = merge_keys.drop_duplicates(subset=["HS6", "sic"])
     return merge_keys
 
 
@@ -237,6 +245,110 @@ def newey_west_cov(X, resid, lags=1):
     return XTX_inv @ S @ XTX_inv
 
 
+def panel_reg(
+    data,
+    dep_var,
+    ind_vars=[],
+    time_fe=True,
+    group_fe=True,
+    robust=True,
+    newey=False,
+    cluster=None,
+    weight_col=None,
+    newey_lags=1,
+):
+
+    # Optionally include weights if provided
+    if weight_col is not None:
+        weights = data[weight_col]
+    else:
+        weights = None
+
+    # Create the exogenous variables (adding a constant)
+    exog = sm.add_constant(data[ind_vars])
+
+    # Set up the PanelOLS model, with both entity and time fixed effects if requested.
+    model = PanelOLS(
+        data[dep_var],
+        exog,
+        weights=weights,
+        entity_effects=group_fe,
+        time_effects=time_fe,
+    )
+
+    # Set standard errors based on parameters
+    kwargs = {}
+    if newey:
+        # Use a kernel covariance estimator (Bartlett kernel) for Newey–West style errors.
+        kwargs["cov_type"] = "kernel"
+        kwargs["kernel"] = "bartlett"
+        kwargs["bandwidth"] = newey_lags
+    elif cluster is not None:
+        # Cluster the standard errors on the specified variable.
+        kwargs["cov_type"] = "clustered"
+        kwargs["clusters"] = data[cluster]
+    elif robust:
+        # Use robust (heteroskedasticity-consistent) standard errors.
+        kwargs["cov_type"] = "robust"
+    else:
+        kwargs["cov_type"] = "unadjusted"
+
+    results = model.fit(**kwargs)
+    return results
+
+
+def panel_reg(
+    data,
+    dep_var,
+    ind_vars=[],
+    time_fe=True,
+    group_fe=True,
+    robust=True,
+    newey=False,
+    cluster=None,
+    weight_col=None,
+    newey_lags=1,
+):
+
+    # Optionally include weights if provided
+    if weight_col is not None:
+        weights = data[weight_col]
+    else:
+        weights = None
+
+    # Create the exogenous variables (adding a constant)
+    exog = sm.add_constant(data[ind_vars])
+
+    # Set up the PanelOLS model, with both entity and time fixed effects if requested.
+    model = PanelOLS(
+        data[dep_var],
+        exog,
+        weights=weights,
+        entity_effects=group_fe,
+        time_effects=time_fe,
+    )
+
+    # Set standard errors based on parameters
+    kwargs = {}
+    if newey:
+        # Use a kernel covariance estimator (Bartlett kernel) for Newey–West style errors.
+        kwargs["cov_type"] = "kernel"
+        kwargs["kernel"] = "bartlett"
+        kwargs["bandwidth"] = newey_lags
+    elif cluster is not None:
+        # Cluster the standard errors on the specified variable.
+        kwargs["cov_type"] = "clustered"
+        kwargs["clusters"] = data[cluster]
+    elif robust:
+        # Use robust (heteroskedasticity-consistent) standard errors.
+        kwargs["cov_type"] = "robust"
+    else:
+        kwargs["cov_type"] = "unadjusted"
+
+    results = model.fit(**kwargs)
+    return results
+
+
 def regfe(
     data,
     dep_var,
@@ -318,9 +430,11 @@ def regfe(
 ###### Functions for graphing
 
 
-def demean_by_fixed_effects(df, x_var, fe_vars, weight_col=None):
-    result = regfe(df, x_var, fe_vars=fe_vars, robust=False, weight_col=weight_col)
-    return result.resid() + df[x_var].mean()
+def demean_by_fixed_effects(df, x_var, time_fe=True, group_fe=True, weight_col=None):
+    result = panel_reg(
+        df, x_var, time_fe=time_fe, group_fe=group_fe, weight_col=weight_col
+    )
+    return result.resids + df[x_var].mean()
 
 
 def binscatter_plot(
