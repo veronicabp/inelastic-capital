@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import pickle
 
 import os
 import re
@@ -9,12 +10,19 @@ from itertools import product
 
 import statsmodels.api as sm
 from linearmodels.panel import PanelOLS
+from linearmodels.iv import IV2SLS
 import pyfixest as pf
 from pyfixest import feols
+from scipy import stats
 from scipy.stats.mstats import winsorize
 from stargazer.stargazer import Stargazer
 
+import requests
+import json
+
 from tqdm import tqdm
+
+tqdm.pandas()
 
 from importlib import reload
 
@@ -23,14 +31,77 @@ from linearmodels.panel.model import MissingValueWarning
 
 warnings.filterwarnings("ignore", category=MissingValueWarning)
 
+data_folder = os.path.join("..", "data")
+figures_folder = "/Users/vbp/Princeton Dropbox/Veronica Backer Peral/Apps/Overleaf/Inelastic Capital/Figures"
 
-figures_path = "/Users/vbp/Downloads"
+klms_folder = "/Users/vbp/Princeton Dropbox/Veronica Backer Peral/Princeton/MianSufiRoll/round2_response/data_2024_update/data"
+
+# %% OECD country codes
+oecd_codes = [
+    36,  # Australia
+    40,  # Austria
+    56,  # Belgium
+    124,  # Canada
+    152,  # Chile
+    203,  # Czech Republic
+    208,  # Denmark
+    233,  # Estonia
+    246,  # Finland
+    251,  # France
+    276,  # Germany
+    300,  # Greece
+    348,  # Hungary
+    352,  # Iceland
+    372,  # Ireland
+    376,  # Israel
+    380,  # Italy
+    392,  # Japan
+    410,  # Korea
+    428,  # Latvia
+    440,  # Lithuania
+    442,  # Luxembourg
+    484,  # Mexico
+    528,  # Netherlands
+    554,  # New Zealand
+    579,  # Norway
+    616,  # Poland
+    620,  # Portugal
+    703,  # Slovakia
+    705,  # Slovenia
+    724,  # Spain
+    752,  # Sweden
+    757,  # Switzerland
+    792,  # Turkey
+    826,  # United Kingdom
+    842,  # United States
+]
+
+brics_codes = [
+    76,  # Brazil
+    156,  # China
+    643,  # Russia
+    699,  # India
+    710,  # South Africa
+]
+
+country_codes = oecd_codes + brics_codes
 
 
 ###### Functions to load data
+def load_ppi_data(data_folder):
+    return pd.read_stata(f"{data_folder}/working/naics_ppi_yearly.dta")
 
 
 def load_baci_data(data_folder):
+    """
+    Load BACI data from the raw folder and return a DataFrame with the following columns:
+    - year
+    - exporter
+    - importer
+    - HS6
+    - value
+    - quantity
+    """
     baci_folder = os.path.join(data_folder, "raw", "baci")
     country_codes_file = "country_codes_V202301.csv"
     product_codes_file = "product_codes_HS92_V202301.csv"
@@ -202,17 +273,74 @@ def get_lag(df, group_cols, shift_col="value", shift_amt=1):
     return df_merged
 
 
-def get_product_prices(baci_us, agg_level="HS4"):
-    # Get totals by product, year
-    df = baci_us.groupby([agg_level, "year"])[["value", "quantity"]].sum().reset_index()
-    # df = baci_us.copy()
-    df["price"] = df["value"] / df["quantity"]
-    # df = (
-    #     df.groupby([agg_level, "year"])
-    #     .agg({"quantity": "sum", "value": "sum", "price": "mean"})
-    #     .reset_index()
-    # )
+def weighted_median_price(sub_df, col="price", weight_column="quantity"):
+    """
+    Calculate the weighted median price of the column using the specified weight column.
+    """
+    # Sort by price
+    sub_df = sub_df.sort_values(col)
+    # Calculate the cumulative sum of the weights (quantity)
+    cumulative = sub_df[weight_column].cumsum()
+    # Define the cutoff (half of the total weight)
+    cutoff = sub_df[weight_column].sum() / 2.0
+    # Return the price where the cumulative weight meets/exceeds the cutoff
+    return sub_df.loc[cumulative >= cutoff, col].iloc[0]
 
+
+def weighted_mean(df, col="price", weight_column="quantity"):
+    """
+    Calculate the weighted mean of the column using the specified weight column.
+
+    Args:
+        df (pd.DataFrame): DataFrame containing at least 'price' and the weight column.
+        weight_column (str): Name of the column to use as weights (default is 'quantity').
+
+    Returns:
+        float: Weighted mean of the col.
+    """
+    # Ensure the weight column is not zero to avoid division errors
+    total_weight = df[weight_column].sum()
+    if total_weight == 0:
+        return float("nan")
+
+    return (df[col] * df[weight_column]).sum() / total_weight
+
+
+def get_product_prices(df, groupby=["exporter", "HS6"]):
+    """
+    Calculate the price of each product for each exporter.
+    """
+    # Average price
+    # df = baci_us.groupby([agg_level, "year"])[["value", "quantity"]].sum().reset_index()
+    # df["price"] = df["value"] / df["quantity"]
+
+    # Median price
+    df["price"] = df["value"] / df["quantity"]
+    grouped = df.groupby(groupby + ["year"])
+    df = grouped.progress_apply(
+        lambda sub_df: pd.Series(
+            {
+                "quantity": sub_df["quantity"].sum(),
+                "value": sub_df["value"].sum(),
+                "price": weighted_median_price(sub_df),
+            }
+        )
+    ).reset_index()
+    return df
+
+
+def construct_relative_prices(df, agg_level="HS6"):
+    grouped = (
+        df.groupby([agg_level, "year"])
+        .progress_apply(
+            lambda sub_df: weighted_mean(sub_df, weight_column="quantity", col="price")
+        )
+        .reset_index()
+        .rename(columns={0: "price_mn"})
+    )
+    df = df.merge(grouped, on=[agg_level, "year"], how="left")
+
+    df["relative_price"] = df["price"] / df["price_mn"]
     return df
 
 
@@ -274,6 +402,64 @@ def panel_reg(
         weights=weights,
         entity_effects=group_fe,
         time_effects=time_fe,
+    )
+
+    # Set standard errors based on parameters
+    kwargs = {}
+    if newey:
+        # Use a kernel covariance estimator (Bartlett kernel) for Newey–West style errors.
+        kwargs["cov_type"] = "kernel"
+        kwargs["kernel"] = "bartlett"
+        kwargs["bandwidth"] = newey_lags
+    elif cluster is not None:
+        # Cluster the standard errors on the specified variable.
+        kwargs["cov_type"] = "clustered"
+        kwargs["clusters"] = data[cluster]
+    elif robust:
+        # Use robust (heteroskedasticity-consistent) standard errors.
+        kwargs["cov_type"] = "robust"
+    else:
+        kwargs["cov_type"] = "unadjusted"
+
+    results = model.fit(**kwargs)
+    return results
+
+
+def iv_panel_reg(
+    df,
+    dep_var,
+    exog=[],
+    endog=[],
+    instruments=[],
+    time_fe=True,
+    group_fe=True,
+    robust=True,
+    newey=False,
+    cluster=None,
+    weight_col=None,
+    newey_lags=1,
+):
+    data = df.copy()
+
+    # Optionally include weights if provided
+    if weight_col is not None:
+        weights = data[weight_col]
+    else:
+        weights = None
+
+    # De-mean before, since IV module cannot accept fixed effects
+    for col in [dep_var] + exog + endog + instruments:
+        data[col] = demean_by_fixed_effects(
+            data, col, time_fe=time_fe, group_fe=group_fe
+        )
+
+    # Run IV
+    model = IV2SLS(
+        dependent=data[dep_var],
+        exog=sm.add_constant(data[exog]),
+        endog=data[endog],
+        instruments=data[instruments],
+        weights=weights,
     )
 
     # Set standard errors based on parameters
@@ -360,6 +546,7 @@ def regfe(
     cluster_type="CRV1",  # 'CRV1' or 'CRV3'
     vcov_extra=None,
     weight_col=None,
+    verbose=False,
 ):
     """
     Run a fixed effects regression using the pyfixest package.
@@ -397,7 +584,8 @@ def regfe(
     else:
         formula = base_formula
 
-    print("Using formula:", formula)
+    if verbose:
+        print("Using formula:", formula)
 
     # Determine the vcov option
     if vcov_extra is not None:
@@ -442,10 +630,13 @@ def binscatter_plot(
     x_var,
     y_var,
     num_bins=20,
-    fe_vars=None,
+    time_fe=False,
+    group_fe=False,
     weights=None,
     connect_dots=False,
     filename=None,
+    x_label=None,
+    y_label=None,
 ):
     """
     Create a binscatter plot by binning the x variable and averaging the y variable within each bin.
@@ -464,24 +655,20 @@ def binscatter_plot(
         connect_dots (bool): Whether to connect the binned points with a line.
         filename (str, optional): If provided, saves the plot to this filename.
     """
-    # If fixed effects are to be removed, work with a DataFrame that includes them.
-    if fe_vars is not None:
-        # If a single fixed effect is provided as a string, convert it to a list.
-        if isinstance(fe_vars, str):
-            fe_vars = [fe_vars]
-        cols = [x_var, y_var] + fe_vars
-        if weights is not None:
-            cols.append(weights)
-        df = data[cols].dropna().copy()
+    cols = [x_var, y_var]
+    if weights is not None:
+        cols.append(weights)
+    df = data[cols].dropna().copy()
 
+    # If fixed effects are to be removed, work with a DataFrame that includes them.
+    if time_fe or group_fe:
         # Replace x_var and y_var with their demeaned versions.
-        df[x_var] = demean_by_fixed_effects(df, x_var, fe_vars, weight_col=weights)
-        df[y_var] = demean_by_fixed_effects(df, y_var, fe_vars, weight_col=weights)
-    else:
-        cols = [x_var, y_var]
-        if weights is not None:
-            cols.append(weights)
-        df = data[cols].dropna().copy()
+        df[x_var] = demean_by_fixed_effects(
+            df, x_var, weight_col=weights, time_fe=time_fe, group_fe=group_fe
+        )
+        df[y_var] = demean_by_fixed_effects(
+            df, y_var, weight_col=weights, time_fe=time_fe, group_fe=group_fe
+        )
 
     # Create quantile-based bins that have an equal number of data points.
     df["bin"] = pd.qcut(df[x_var], q=num_bins, duplicates="drop")
@@ -513,16 +700,8 @@ def binscatter_plot(
         plt.plot(grouped[x_var], grouped[y_var], color="red", linewidth=1, alpha=0.7)
 
     # Label axes and add a title.
-    xlabel = x_var if fe_vars is None else f"{x_var} (demeaned)"
-    ylabel = y_var if fe_vars is None else f"{y_var} (demeaned)"
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    title = "Binscatter Plot"
-    if fe_vars is not None:
-        title += " (Fixed Effects Demeaned)"
-    if weights is not None:
-        title += " (Weighted)"
-    plt.title(title)
+    plt.xlabel(x_label if x_label else x_var)
+    plt.ylabel(y_label if y_label else y_var)
 
     if filename:
         plt.savefig(os.path.join("figures_path", filename), bbox_inches="tight")

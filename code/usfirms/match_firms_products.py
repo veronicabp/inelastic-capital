@@ -36,6 +36,7 @@ def run_gpt(model="gpt-4o", context_prompt="", prompt="", get_full_response=Fals
     # print(response.json())
 
     if "choices" not in response.json():
+
         print(response.json())
         return "ERROR"
 
@@ -72,13 +73,16 @@ def match_firms_products():
     ]
 
     # Keep sample years
-    compustat = compustat[(compustat.fyearq >= 2000) & (compustat.fyearq <= 2007)]
+    compustat = compustat[(compustat.fyearq >= 1994)]
 
     # Collapse by company
-    compustat["n_obs"] = compustat.groupby("GVKEY")["datadate"].transform("count")
-    compustat = compustat[["GVKEY", "conml", "n_obs"]].drop_duplicates(subset=["GVKEY"])
-    compustat = compustat.rename(columns={"GVKEY": "gvkey", "conml": "company_name"})
-    compustat = compustat.sort_values(by="gvkey")
+    compustat["n_obs"] = compustat.groupby("LPERMNO")["datadate"].transform("count")
+    compustat = compustat[["LPERMNO", "conml", "n_obs"]].drop_duplicates(
+        subset=["LPERMNO"]
+    )
+    compustat = compustat.rename(columns={"LPERMNO": "permno", "conml": "company_name"})
+    compustat = compustat.sort_values(by="permno")
+    compustat = compustat.reset_index(drop=True)
 
     # Keep observations with at least four years
     compustat[compustat.n_obs > 4 * 4]
@@ -88,11 +92,13 @@ def match_firms_products():
         df = pd.read_csv(csv_file)
     else:
         df = pd.DataFrame(
-            columns=["gvkey", "firm_name", "HS4_codes", "model", "description"]
+            columns=["permno", "firm_name", "HS4_codes", "model", "description"]
         )
 
     # model = "o1-preview"
-    model = "o1-mini"
+    # model = "o1-mini"
+    model = "gpt-4o"
+
     for i, row in compustat.iterrows():
 
         firm_name = row.company_name
@@ -101,7 +107,7 @@ def match_firms_products():
 
         prompt = f"You are a researcher matching Harmonized System (HS) codes to US firms. In particular, you are interested in determining the four-digit HS codes associated with the products produced by {firm_name}. Please provide a description of which codes are most appropriate. At the end of your response, output a list of the codes formatted as a Python list (e.g.) [XXXX, YYYY, ...]. If the firm only produces services and does not produce products, output an empty list []. If you do not have any information about this firm, output 'NA' and nothing else."
 
-        print(firm_name)
+        print(f"[{i}/{len(compustat)}]: {firm_name}")
         print("=" * len(firm_name))
 
         result = run_gpt(model=model, prompt=prompt).replace("```", "")
@@ -121,8 +127,8 @@ def match_firms_products():
             HS4_code = "[]"
 
         new_row = pd.DataFrame(
-            [[row.gvkey, firm_name, HS4_code, model, result]],
-            columns=["gvkey", "firm_name", "HS4_codes", "model", "description"],
+            [[row.permno, firm_name, HS4_code, model, result]],
+            columns=["permno", "firm_name", "HS4_codes", "model", "description"],
         )
 
         df = pd.concat([df, new_row]).copy()
