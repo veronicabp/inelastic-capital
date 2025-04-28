@@ -1,4 +1,7 @@
 from utils import *
+import utils
+
+reload(utils)
 
 
 class DemandShocks:
@@ -9,10 +12,10 @@ class DemandShocks:
 
         if not parameters:
             self.parameters = {
-                "agg_level": ["HS6", "HS4"],  # , "HS2", "naics"
-                "growth_var": ["gdp"],  # "imports"
+                "agg_level": ["HS6", "HS4", "naics"],
+                "timeseries_var": ["gdp"],  # "imports"
                 "use_prev_year": [True],
-                "share_var": ["quantity", "value"],
+                "share_var": ["quantity"],
             }
         else:
             self.parameters = parameters
@@ -29,28 +32,26 @@ class DemandShocks:
         self.gdp = load_gdp_data(self.data_folder)
         self.gdp = self.gdp[self.gdp.year >= 1995]
 
-    def _create_timeseries_component(self, growth_var="gdp"):
+        self.exchange_rate = utils.load_exchange_rate_data(self.data_folder)
+
+    def _create_timeseries_component(self, timeseries_var="gdp"):
         """
         Create variation in importer growth across industries
         """
         # print("Creating timeseries component")
 
-        if growth_var == "imports":
+        if timeseries_var == "imports":
             df = self.baci.groupby(["importer", "year"])["value"].sum().reset_index()
             df["log_val"] = np.log(df.value)
 
-        elif growth_var == "us_imports":
-            df = (
-                self.baci_us_exports.groupby(["importer", "year"])["value"]
-                .sum()
-                .reset_index()
-            )
-            df["log_val"] = np.log(df.value)
-
-        elif growth_var == "gdp":
+        elif timeseries_var == "gdp":
             df = self.gdp
             df.rename(columns={"country_code": "importer"}, inplace=True)
             df["log_val"] = np.log(df.gdp)
+
+        elif timeseries_var == "exchange_rate":
+            df = self.exchange_rate
+            df["log_val"] = np.log(df.exchange_rate)
 
         # Get log growth over difference period
         df = get_lag(
@@ -70,15 +71,6 @@ class DemandShocks:
         # print("Creating cross-sectional component")
 
         df = self.baci
-
-        if agg_level == "naics":
-            merge_keys = load_naics_hs_crosswalk(self.data_folder)
-            df = df.merge(
-                merge_keys[["naics", "naics5", "naics4", "naics3", "HS6"]],
-                on=["HS6"],
-                how="inner",
-            )
-
         if not use_prev_year:
             df = df[df.year.isin(start_years)]
             df["year"] = str(start_years)
@@ -96,10 +88,12 @@ class DemandShocks:
 
         return df[["exporter", "importer", agg_level, "share", "year"]].copy()
 
-    def _construct_demand_shocks(self, agg_level, growth_var, use_prev_year, share_var):
+    def _construct_demand_shocks(
+        self, agg_level, timeseries_var, use_prev_year, share_var
+    ):
         # print("Constructing demand shocks")
 
-        ts = self._create_timeseries_component(growth_var=growth_var)
+        ts = self._create_timeseries_component(timeseries_var=timeseries_var)
         cs = self._create_cross_sectional_component(
             agg_level=agg_level, use_prev_year=use_prev_year, share_var=share_var
         )
@@ -121,7 +115,7 @@ class DemandShocks:
         return df
 
     def initialize_all_demand_shocks(
-        self, ordered_keys=("agg_level", "growth_var", "use_prev_year", "share_var")
+        self, ordered_keys=("agg_level", "timeseries_var", "use_prev_year", "share_var")
     ):
         """
         Construct demand shocks using all variations of parameters and store in a dictionary
@@ -140,14 +134,19 @@ class DemandShocks:
     def get_demand_shocks(
         self,
         agg_level="HS6",
-        growth_var="gdp",
+        timeseries_var="gdp",
         use_prev_year=True,
         share_var="quantity",
         country_code=842,
     ):
-        if (agg_level, growth_var, use_prev_year, share_var) in self.demand_shocks_dict:
+        if (
+            agg_level,
+            timeseries_var,
+            use_prev_year,
+            share_var,
+        ) in self.demand_shocks_dict:
             ds = self.demand_shocks_dict[
-                (agg_level, growth_var, use_prev_year, share_var)
+                (agg_level, timeseries_var, use_prev_year, share_var)
             ]
             return ds[ds.exporter == country_code]
         else:

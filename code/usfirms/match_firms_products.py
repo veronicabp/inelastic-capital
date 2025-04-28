@@ -59,25 +59,20 @@ def get_prompt(firm_name, df, HS_num):
 
 def match_firms_products():
 
-    compustat_file = os.path.join(
-        data_folder, "raw", "wrds", "CCM_fundamentals_all.dta"
-    )
-    compustat = pd.read_stata(compustat_file)
+    file = os.path.join(data_folder, "raw", "wrds", "CRSP_firm_descriptions.csv")
+    compustat = pd.read_csv(file)
 
     # Keep only sectors that produce goods
-    compustat["naics2"] = compustat["naics"].apply(lambda x: x[:2])
+    compustat["naics2"] = compustat["naics"].astype(str).apply(lambda x: x[:2])
     compustat = compustat[
         ~compustat.naics2.isin(
             ["48", "49", "52", "53", "55", "56", "61", "72", "81", "92"]
         )
     ]
 
-    # Keep sample years
-    compustat = compustat[(compustat.fyearq >= 1994)]
-
     # Collapse by company
     compustat["n_obs"] = compustat.groupby("LPERMNO")["datadate"].transform("count")
-    compustat = compustat[["LPERMNO", "conml", "n_obs"]].drop_duplicates(
+    compustat = compustat[["LPERMNO", "conml", "busdesc", "n_obs"]].drop_duplicates(
         subset=["LPERMNO"]
     )
     compustat = compustat.rename(columns={"LPERMNO": "permno", "conml": "company_name"})
@@ -102,13 +97,15 @@ def match_firms_products():
     for i, row in compustat.iterrows():
 
         firm_name = row.company_name
+        firm_desc = row.busdesc
         if firm_name in df.firm_name.unique():
             continue
 
-        prompt = f"You are a researcher matching Harmonized System (HS) codes to US firms. In particular, you are interested in determining the four-digit HS codes associated with the products produced by {firm_name}. Please provide a description of which codes are most appropriate. At the end of your response, output a list of the codes formatted as a Python list (e.g.) [XXXX, YYYY, ...]. If the firm only produces services and does not produce products, output an empty list []. If you do not have any information about this firm, output 'NA' and nothing else."
+        prompt = f"You are a researcher matching Harmonized System (HS) codes to US firms. In particular, you are interested in determining the four-digit HS codes associated with the products produced by {firm_name}. Here is a brief description of this firm: {firm_desc}. Based on this description and what you know already about {firm_name}, please explain which codes are most appropriate. At the end of your response, output a list of the codes formatted as a Python list (e.g.) [XXXX, YYYY, ...]. If the firm primarily produces services and does not produce products, output an empty list []. If you do not have sufficient information about this firm, output 'NA' and nothing else."
 
         print(f"[{i}/{len(compustat)}]: {firm_name}")
         print("=" * len(firm_name))
+        # print(prompt, "\n\n")
 
         result = run_gpt(model=model, prompt=prompt).replace("```", "")
 
@@ -133,42 +130,3 @@ def match_firms_products():
 
         df = pd.concat([df, new_row]).copy()
         df.to_csv(csv_file, index=False)
-
-    # # Load product code descriptions
-    # product_codes = pd.read_csv(
-    #     os.path.join(data_folder, "raw", "baci", "product_codes_HS92_V202301.csv")
-    # )
-
-    # product_codes["HS2"] = product_codes["code"].apply(lambda x: x[:2])
-    # product_codes["HS4"] = product_codes["code"].apply(lambda x: x[:4])
-
-    # product_codes["HS4_description"] = product_codes["description"].apply(
-    #     lambda x: x.split(":")[0]
-    # )
-
-    # HS4 = (
-    #     product_codes.groupby(["HS4", "HS2"])["HS4_description"]
-    #     .apply(
-    #         lambda x: ", ".join(pd.unique(x))
-    #     )  # join desc values with comma and space
-    #     .reset_index()
-    # ).rename(columns={"HS4_description": "description", "HS4": "code"})
-
-    # HS2 = pd.read_csv(os.path.join(data_folder, "working", "HS2.csv")).rename(
-    #     columns={"HS2": "code"}
-    # )
-
-    # # First, identify the firm's 2 digit code
-
-    # firm_name = "CF & I Steel Corp"
-    # prompt = get_prompt(firm_name, HS2, 2)
-    # result1 = run_gpt(prompt=prompt)
-
-    # prompt = get_prompt(
-    #     firm_name, HS4[HS4.HS2 == "72"].drop_duplicates(subset="description"), 4
-    # )
-    # print(prompt)
-    # result2 = run_gpt(prompt=prompt)
-
-
-# %%

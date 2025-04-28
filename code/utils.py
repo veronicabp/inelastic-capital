@@ -166,6 +166,75 @@ def load_gdp_data(data_folder):
     return df[["iso_3digit_alpha", "country_code", "year", "gdp"]]
 
 
+def load_exchange_rate_data(data_folder):
+    df = pd.read_csv(
+        os.path.join(
+            data_folder,
+            "raw",
+            "unstats",
+            "exchange_rates.csv",
+        )
+    )
+    # Convert AMA exchange rate to numeric
+    df["AMA exchange rate"] = pd.to_numeric(df["AMA exchange rate"], errors="coerce")
+    df["exchange_rate"] = 1 / df["AMA exchange rate"]
+    df.dropna(subset=["exchange_rate"], inplace=True)
+    df = (
+        df[["Country/Area", "Year", "exchange_rate"]]
+        .copy()
+        .rename(columns={"Country/Area": "country_name", "Year": "year"})
+    )
+
+    country_mapping = {
+        "Bolivia (Plurinational State of)": "Plurinational State of Bolivia",
+        "Bosnia and Herzegovina": "Bosnia Herzegovina",
+        "China (mainland)": "China",
+        "China, Hong Kong SAR": "China, Hong Kong Special Administrative Region",
+        "Former Czechoslovakia": "Czechoslovakia",
+        "Former Ethiopia": "Ethiopia",
+        "Former Netherlands Antilles": "Netherlands Antilles",
+        "Former Yugoslavia": "Serbia and Montenegro",
+        "France": "France, Monaco",
+        "Iran, Islamic Republic of": "Iran",
+        "Kingdom of Eswatini": "Swaziland",
+        "Kosovo": "Serbia and Montenegro",
+        "Lao People's Democratic Republic": "Lao People's Dem. Rep.",
+        "Liechtenstein": "Switzerland, Liechtenstein",
+        "Micronesia (Federated States of)": "Federated State of Micronesia",
+        "Monaco": "France, Monaco",
+        "Norway": "Norway, Svalbard and Jan Mayen",
+        "Puerto Rico": "USA, Puerto Rico and US Virgin Islands",
+        "Republic of North Macedonia": "The Former Yugoslav Republic of Macedonia",
+        "Sint Maarten (Dutch part)": "Saint Maarten (Dutch part)",
+        "Switzerland": "Switzerland, Liechtenstein",
+        "Syrian Arab Republic": "Syria",
+        "Türkiye": "Turkey",
+        "United Kingdom of Great Britain and Northern Ireland": "United Kingdom",
+        "United Republic of Tanzania: Mainland": "United Republic of Tanzania",
+        "United Republic of Tanzania: Zanzibar": "United Republic of Tanzania",
+        "United States": "USA, Puerto Rico and US Virgin Islands",
+        "Venezuela (Bolivarian Republic of)": "Venezuela",
+        "Yemen: Former Democratic Yemen": "Yemen",
+        "Yemen: Former Yemen Arab Republic": "Yemen",
+    }
+
+    # Assuming your dataframe is named df and the country column is named 'country'
+    df["country_name"] = df["country_name"].replace(country_mapping)
+
+    baci_country_codes = pd.read_csv(
+        os.path.join(data_folder, "raw", "baci", "country_codes_V202301.csv")
+    )
+    df = df.merge(
+        baci_country_codes,
+        left_on=["country_name"],
+        right_on=["country_name_full"],
+        how="left",
+        indicator=True,
+    )
+
+    return df[["country_code", "year", "exchange_rate"]].copy()
+
+
 def get_naics_subcodes(df):
     df["naics3"] = pd.to_numeric(df.naics.apply(lambda x: str(x)[:3]), errors="coerce")
     df["naics4"] = pd.to_numeric(df.naics.apply(lambda x: str(x)[:4]), errors="coerce")
@@ -704,4 +773,7 @@ def binscatter_plot(
     plt.ylabel(y_label if y_label else y_var)
 
     if filename:
-        plt.savefig(os.path.join("figures_path", filename), bbox_inches="tight")
+        plt.savefig(os.path.join(figures_folder, filename), bbox_inches="tight")
+
+
+# %%

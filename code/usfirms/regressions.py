@@ -8,7 +8,7 @@ class RegressionResults:
         ds,
         agg_level="HS6",
         use_prev_year=True,
-        growth_var="gdp",
+        timeseries_var="gdp",
         share_var="quantity",
         country_code=842,
     ):
@@ -16,7 +16,7 @@ class RegressionResults:
 
         self.agg_level = agg_level
         self.use_prev_year = use_prev_year
-        self.growth_var = growth_var
+        self.timeseries_var = timeseries_var
         self.share_var = share_var
         self.country_code = country_code
 
@@ -45,14 +45,14 @@ class RegressionResults:
         self.initialize_data()
 
         # For US, merge additional data
-        if self.country_code == 842:
+        if self.country_code == 842 and self.agg_level.startswith("HS"):
             self.merge_additional_data()
 
         # Format as panel
         self.data = self.data.set_index([self.agg_level, "year"])
         self.demean_variables()
 
-        if self.country_code == 842:
+        if self.country_code == 842 and self.agg_level.startswith("HS"):
             self.create_interactions()
 
     def initialize_data(self):
@@ -61,7 +61,7 @@ class RegressionResults:
         self.bartik_shocks = self.demand_shocks.get_demand_shocks(
             agg_level=self.agg_level,
             use_prev_year=self.use_prev_year,
-            growth_var=self.growth_var,
+            timeseries_var=self.timeseries_var,
             share_var=self.share_var,
             country_code=self.country_code,
         )
@@ -117,12 +117,20 @@ class RegressionResults:
     def demean_variables(self):
         # De-mean
         for col in ["value", "quantity", "price"]:
-            self.data[f"d_log_{col}_dm"] = utils.demean_by_fixed_effects(
+            self.data[f"d_log_{col}_dm_group"] = utils.demean_by_fixed_effects(
                 self.data, f"d_log_{col}_win", time_fe=False, group_fe=True
             )
 
-        self.data[f"shock_dm"] = utils.demean_by_fixed_effects(
+            self.data[f"d_log_{col}_dm_year"] = utils.demean_by_fixed_effects(
+                self.data, f"d_log_{col}_win", time_fe=True, group_fe=False
+            )
+
+        self.data[f"shock_dm_group"] = utils.demean_by_fixed_effects(
             self.data, f"shock_win", time_fe=False, group_fe=True
+        )
+
+        self.data[f"shock_dm_year"] = utils.demean_by_fixed_effects(
+            self.data, f"shock_win", time_fe=True, group_fe=False
         )
 
     def merge_additional_data(self):
@@ -142,7 +150,7 @@ class RegressionResults:
                 col
             ].std()
 
-            for shock in ["shock_win", "shock_dm"]:
+            for shock in ["shock_win", "shock_dm_group"]:
                 self.data[f"{shock}_x_{col}"] = self.data[shock] * self.data[col]
 
     def load_crosswalks(self):
@@ -391,7 +399,7 @@ class RegressionResults:
 
         latex_table = stargazer.render_latex().replace("[!htbp]", "[H]")
         with open(
-            f"{self.tables_folder}/panel_{self.agg_level}_{self.growth_var}_{self.share_var}_{self.use_prev_year}{tag}.tex",
+            f"{self.tables_folder}/panel_{self.agg_level}_{self.timeseries_var}_{self.share_var}_{self.use_prev_year}{tag}.tex",
             "w",
         ) as f:
             f.write(latex_table)
@@ -413,26 +421,28 @@ class RegressionResults:
 
         return model.params["d_log_price_win"], model.std_errors["d_log_price_win"]
 
-    def run_baseline_regressions(self):
-        self.panel_regression_table()
+    def run_baseline_regressions(self, tag=""):
+        self.panel_regression_table(tag=tag)
 
         for col in self.covariate_cols:
             self.panel_regression_table(
                 indep_vars=["shock_win", f"shock_win_x_{col}"],
-                tag=f"_{col}",
+                tag=f"_{col}{tag}",
                 rename_dict={
                     "shock_win": "Shock",
                     f"shock_win_x_{col}": f"Shock x {col}",
                 },
             )
 
-        self.annual_regression_plot(dep_var="d_log_value_dm")
-        self.annual_regression_plot(dep_var="d_log_quantity_dm")
-        self.annual_regression_plot(dep_var="d_log_price_dm")
+        self.annual_regression_plot(dep_var="d_log_value_dm_group", tag=tag)
+        self.annual_regression_plot(dep_var="d_log_quantity_dm_group", tag=tag)
+        self.annual_regression_plot(dep_var="d_log_price_dm_group", tag=tag)
 
-        self.make_binscatters()
+        self.make_binscatters(tag=tag)
 
-    def annual_regression_plot(self, indep_var="shock_dm", dep_var="d_log_value_dm"):
+    def annual_regression_plot(
+        self, indep_var="shock_dm_group", dep_var="d_log_value_dm_group", tag=""
+    ):
         years = []
         coeffs = []
         ses = []
@@ -459,10 +469,10 @@ class RegressionResults:
         plt.axhline(0)
 
         plt.savefig(
-            f"{self.figures_folder}/annual_coef_{dep_var}_{self.agg_level}_{self.growth_var}_{self.share_var}_{self.use_prev_year}.png"
+            f"{self.figures_folder}/annual_coef_{dep_var}_{self.agg_level}_{self.timeseries_var}_{self.share_var}_{self.use_prev_year}{tag}.png"
         )
 
-    def make_binscatters(self):
+    def make_binscatters(self, tag=""):
         for col in ["value", "quantity", "price"]:
             utils.binscatter_plot(
                 self.data,
@@ -473,7 +483,7 @@ class RegressionResults:
                 group_fe=True,
                 x_label=f"Demand Shock ({self.difference_amt} yr)",
                 y_label=f"Log Change in {col.title()} ({self.difference_amt} yr)",
-                filename=f"{self.figures_folder}/binscatter_{col}_panel_FE_{self.agg_level}_{self.growth_var}_{self.share_var}_{self.use_prev_year}.png",
+                filename=f"{self.figures_folder}/binscatter_{col}_panel_FE_{self.agg_level}_{self.timeseries_var}_{self.share_var}_{self.use_prev_year}{tag}.png",
             )
 
             # Binscatter of interactions
@@ -510,7 +520,7 @@ class RegressionResults:
                     group_fe=True,
                     x_label=f"Demand Shock ({self.difference_amt} yr) x {cov_col}",
                     y_label=f"Log Change in {col.title()} ({self.difference_amt} yr)",
-                    filename=f"{self.figures_folder}/binscatter_{col}_panel_FE_{cov_col}_interaction_{self.agg_level}_{self.growth_var}_{self.share_var}_{self.use_prev_year}.png",
+                    filename=f"{self.figures_folder}/binscatter_{col}_panel_FE_{cov_col}_interaction_{self.agg_level}_{self.timeseries_var}_{self.share_var}_{self.use_prev_year}{tag}.png",
                 )
 
     def persistence(self, rank_agg_level="HS2"):
@@ -537,12 +547,12 @@ class RegressionResults:
                     ].copy()
                     result = utils.regfe(
                         sub,
-                        f"d_log_{col}_dm",
-                        ["shock_dm"],
+                        f"d_log_{col}_dm_group",
+                        ["shock_dm_group"],
                         fe_vars=["year", rank_agg_level],
                     )
-                    coeffs.append(result.coef()["shock_dm"])
-                    ses.append(result.se()["shock_dm"])
+                    coeffs.append(result.coef()["shock_dm_group"])
+                    ses.append(result.se()["shock_dm_group"])
                     codes.append(code)
                     periods.append(i)
 
@@ -595,7 +605,7 @@ class RegressionResults:
             plt.ylabel("Second Period Coefficient")
 
             plt.savefig(
-                f"{self.figures_folder}/HS2_persistence_{col}_{self.growth_var}_{self.share_var}_{self.use_prev_year}.png"
+                f"{self.figures_folder}/HS2_persistence_{col}_{self.timeseries_var}_{self.share_var}_{self.use_prev_year}.png"
             )
 
     def bls_price_regressions(self):
@@ -630,7 +640,7 @@ class RegressionResults:
             group_fe=True,
             x_label=f"Demand Shock ({self.difference_amt} yr)",
             y_label=f"Log Change in Price ({self.difference_amt} yr)",
-            filename=f"{self.figures_folder}/binscatter_dppi_panel_FE_{self.agg_level}_{self.growth_var}_{self.share_var}_{self.use_prev_year}.png",
+            filename=f"{self.figures_folder}/binscatter_dppi_panel_FE_{self.agg_level}_{self.timeseries_var}_{self.share_var}_{self.use_prev_year}.png",
         )
 
         utils.binscatter_plot(
@@ -642,7 +652,7 @@ class RegressionResults:
             group_fe=True,
             x_label="Demand Shock",
             y_label=f"Log Change in Price",
-            filename=f"{self.figures_folder}/binscatter_d1ppi_panel_FE_{self.agg_level}_{self.growth_var}_{self.share_var}_{self.use_prev_year}.png",
+            filename=f"{self.figures_folder}/binscatter_d1ppi_panel_FE_{self.agg_level}_{self.timeseries_var}_{self.share_var}_{self.use_prev_year}.png",
         )
 
     def naics_level_elasticity(self):
@@ -687,3 +697,122 @@ class RegressionResults:
                 data[f"{col}_se"].append(model.std_errors["shock_win"])
 
         df = pd.DataFrame(data)
+
+    def product_responsiveness(self, outcome_var="d_log_price_win"):
+
+        df = self.data
+        coef = []
+        se = []
+
+        hs_codes = np.unique(df.index.get_level_values(self.agg_level))
+        for code in tqdm(hs_codes):
+            df_sub = df[df.index.get_level_values(self.agg_level) == code].copy()
+
+            if len(df_sub) < 5:
+                coef.append(np.nan)
+                se.append(np.nan)
+                continue
+
+            model = utils.panel_reg(
+                df_sub, outcome_var, f"shock_dm_year", time_fe=False, group_fe=False
+            )
+
+            coef.append(model.params["shock_dm_year"])
+            se.append(model.std_errors["shock_dm_year"])
+
+        output = pd.DataFrame(
+            {
+                self.agg_level: hs_codes,
+                "sigma": coef,
+                "sigma_var": np.array(se) ** 2,
+            }
+        )
+        return output
+
+    def product_elasticity(self):
+
+        df = self.data
+        coef = []
+        se = []
+
+        hs_codes = np.unique(df.index.get_level_values(self.agg_level))
+        for code in tqdm(hs_codes):
+            df_sub = df[df.index.get_level_values(self.agg_level) == code].copy()
+
+            if len(df_sub) < 5:
+                coef.append(np.nan)
+                se.append(np.nan)
+                continue
+
+            model = utils.iv_panel_reg(
+                df_sub,
+                dep_var="d_log_quantity_win",
+                exog=[],
+                endog=["d_log_price_win"],
+                instruments=["shock_win"],
+                newey=True,
+                newey_lags=4,
+                time_fe=False,
+                group_fe=False,
+            )
+
+            coef.append(model.params["d_log_price_win"])
+            se.append(model.std_errors["d_log_price_win"])
+
+            # model = utils.panel_reg(
+            #     df_sub, f"d_log_price_win", f"shock_win", time_fe=False, group_fe=False
+            # )
+
+            # coef.append(model.params["shock_win"])
+            # se.append(model.std_errors["shock_win"])
+
+        output = pd.DataFrame(
+            {
+                self.agg_level: hs_codes,
+                "sigma": coef,
+                "sigma_var": np.array(se) ** 2,
+            }
+        )
+        output.to_csv(
+            f"{data_folder}/working/{self.agg_level}_elasticity.csv", index=False
+        )
+
+        return output
+
+    def run_naics_regressions(self):
+        if self.agg_level != "naics":
+            print("NAICS regressions are only set up to work for NAICS-level data.")
+            return
+
+        # Merge in naics-level data
+        file = f"{self.data_folder}/raw/nber-manufacturing-data/nberces5818v1_n2012.csv"
+        nber_data = pd.read_csv(file)
+
+        # Take lags
+        for var in ["invest", "cap", "piship", "emp"]:
+            for i in range(1, self.difference_amt + 1):
+                nber_data = utils.get_lag(
+                    nber_data,
+                    ["naics", "year"],
+                    shift_col=var,
+                    shift_amt=i,
+                )
+        for var in ["invest", "cap", "piship", "emp"]:
+            nber_data[f"d_log_{var}"] = np.log(nber_data[var]) - np.log(
+                nber_data[f"L{self.difference_amt}_{var}"]
+            )
+        nber_data["log_cum_invest"] = np.log(
+            nber_data["invest"]
+            + nber_data["L1_invest"]
+            + nber_data["L2_invest"]
+            + nber_data["L3_invest"]
+            + nber_data["L4_invest"]
+        )
+
+        df = self.data.reset_index()
+        df = df.merge(
+            nber_data,
+            on=["naics", "year"],
+            how="inner",
+        )
+        df = df.set_index(["naics", "year"])

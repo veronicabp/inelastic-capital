@@ -2,7 +2,7 @@ from utils import *
 import utils
 
 
-def estimate_industry_duration(data_folder, chunksize=10**6):
+def estimate_industry_duration(data_folder, weight_col="MV"):
 
     # Load monetary policy shocks
     mp_shocks = pd.read_stata(f"{klms_folder}/proc/master_fomc_level_24.dta")
@@ -12,112 +12,105 @@ def estimate_industry_duration(data_folder, chunksize=10**6):
         .rename(columns={"daten": "date"})
     )
 
-    # Load WRDS data and merge
-    chunk_list = []
-    for chunk in tqdm(
-        pd.read_csv(
-            f"{data_folder}/raw/wrds/Compustat_Securities_Daily_all.csv",
-            chunksize=chunksize,
-            usecols=["gvkey", "datadate", "prccd", "ajexdi", "cshoc", "naics", "fic"],
-        )
-    ):
-        # Filter to only US firms
-        chunk.drop(chunk[chunk["fic"] != "USA"].index, inplace=True)
-        chunk.dropna(subset=["gvkey", "datadate", "prccd", "ajexdi"], inplace=True)
-
-        # Convert datadate to datetime
-        chunk["date"] = pd.to_datetime(chunk["datadate"], format="%Y-%m-%d")
-
-        # Calculate adjusted prices and log returns
-        chunk["Padj"] = chunk["prccd"] / chunk["ajexdi"]
-        chunk.sort_values(["gvkey", "date"], inplace=True)
-        chunk["log_ret"] = np.log(
-            chunk["Padj"] / chunk.groupby("gvkey")["Padj"].shift(1)
-        )
-
-        chunk = chunk[["date", "gvkey", "naics", "log_ret", "cshoc", "prccd"]].merge(
-            mp_shocks[["date", "MPS", "mp_klms_filtered"]],
-            on="date",
-            how="inner",
-        )
-
-        chunk_list.append(chunk)
-
-    # Concatenate all processed chunks
-    df = pd.concat(chunk_list)
-    df.to_csv(f"{data_folder}/working/stock_returns_fomc.csv", index=False)
-
-    # Merge in market value from fundamentals
-    fundamentals = pd.read_csv(
-        f"{data_folder}/raw/wrds/Compustat_Fundamentals_Quarterly_all.csv",
-        usecols=["gvkey", "fyearq", "fqtr", "prccq", "cshoq"],
+    # Load firm data
+    df = pd.read_stata(f"{klms_folder}/proc/master_firm_level_24.dta")
+    df = (
+        df[["permno", "daten", "shock_hf_30min", "MV"]]
+        .copy()
+        .rename(columns={"daten": "date"})
     )
-    fundamentals["market_value"] = fundamentals["prccq"] * fundamentals["cshoq"]
-    fundamentals.dropna(subset="market_value", inplace=True)
-    fundamentals.drop(
-        fundamentals[fundamentals["market_value"] <= 0].index, inplace=True
-    )
+    df.dropna(subset=["shock_hf_30min", "MV"], inplace=True)
+    df = df.merge(mp_shocks, on="date", how="inner")
 
-    # Take mean by year
-    fundamentals = (
-        fundamentals.groupby(["gvkey", "fyearq"], as_index=False)
-        .agg({"market_value": "mean"})
-        .reset_index()
-    )
-
-    df["fyearq"] = df["date"].dt.year
+    # Merge with product codes
+    firm_hscodes = pd.read_csv(os.path.join(data_folder, "working", "firm_hscodes.csv"))
+    firm_hscodes["HS4_codes"] = firm_hscodes["HS4_codes"].str.findall(r"\d+")
+    firm_hscodes = firm_hscodes.explode("HS4_codes")
+    firm_hscodes.dropna(subset=["HS4_codes"], inplace=True)
     df = df.merge(
-        fundamentals,
-        on=["gvkey", "fyearq"],
+        firm_hscodes[["permno", "HS4_codes"]],
+        on="permno",
         how="inner",
     )
 
-    # Estimate responsiveness to monetary policy shocks at industry level
-    df.dropna(subset=["log_ret", "MPS", "naics"], inplace=True)
-
-    # Convert naics to string
-    naics_len = 6
-    df["naics"] = df["naics"].astype(int).astype(str)
-    df["naics"] = df["naics"].str[:naics_len]
-    df.drop(df[df["naics"].str.len() != naics_len].index, inplace=True)
-
-    df = df.set_index(["gvkey", "date"])
+    df = df.set_index(["permno", "date"])
     coef = []
     se = []
 
-    naics_codes = df.naics.unique()
-    for naics in tqdm(naics_codes):
-        df_naics = df[df.naics == naics]
-        # Get number of unique gvkeys (which is an index)
-        if df_naics.index.get_level_values("gvkey").nunique() < 5:
+    hs_codes = df.HS4_codes.unique()
+    for code in tqdm(hs_codes):
+        df_sub = df[df.HS4_codes == code]
+
+        if len(df_sub) < 5:
             coef.append(np.nan)
             se.append(np.nan)
             continue
 
         model = utils.panel_reg(
-            df_naics,
-            f"log_ret",
-            f"MPS",
+            df_sub,
+            f"shock_hf_30min",
+            f"mp_klms_U",
             time_fe=False,
-            group_fe=True,
-            weight_col="market_value",
-            newey=True,
-            newey_lags=4,
+            group_fe=False,
+            weight_col=weight_col,
         )
 
-        coef.append(model.params["MPS"])
-        se.append(model.std_errors["MPS"])
-
-    if naics_len == 6:
-        naics_col = "naics"
-    else:
-        naics_col = f"naics{naics_len}"
+        coef.append(model.params["mp_klms_U"])
+        se.append(model.std_errors["mp_klms_U"])
 
     output = pd.DataFrame(
         {
-            naics_col: naics_codes,
+            "HS4": hs_codes,
             "beta": coef,
             "beta_var": np.array(se) ** 2,
         }
     )
-    output.to_csv(f"{data_folder}/working/industry_duration.csv", index=False)
+    output.to_csv(f"{data_folder}/working/HS4_duration.csv", index=False)
+    return output
+
+
+def duration_elas_regressions(data_folder, results_HS4):
+    durs_dict = {}
+    for weight_col in ["MV"]:
+        duration = estimate_industry_duration(data_folder, weight_col=weight_col)
+        durs_dict[weight_col] = duration
+
+    elas_dict = {}
+    for outcome_var in ["d_log_quantity_dm_year", "d_log_price_dm_year"]:
+        elas = results_HS4.product_responsiveness(outcome_var=outcome_var)
+        elas_dict[outcome_var] = elas
+
+    elas_dict["IV"] = results_HS4.product_elasticity()
+
+    # %%
+    for outcome_var in ["d_log_quantity_dm_year", "d_log_price_dm_year", "IV"]:
+        elas = elas_dict[outcome_var]
+        for weight_col in ["MV"]:
+            duration = durs_dict[weight_col]
+            df = elas.merge(duration, on="HS4")
+            df["weight"] = 1 / (df.beta_var + df.sigma_var)
+
+            var = outcome_var.replace("d_log_", "").replace("_dm_year", "")
+            if weight_col == "MV":
+                filename = (
+                    f"{figures_folder}/HS4_{var}_response_duration_weighted_diff1.png"
+                )
+
+            else:
+                filename = f"{figures_folder}/HS4_{var}_response_duration_diff1.png"
+
+            utils.binscatter_plot(
+                df, "sigma", "beta", weights="weight", filename=filename
+            )
+
+            model = sm.WLS(
+                df["beta"],
+                sm.add_constant(df["sigma"]),
+                weights=df["weight"],
+                missing="drop",
+            ).fit()
+
+            if weight_col == "MV":
+                print(outcome_var)
+                print("--" * 20)
+                print(model.summary())
