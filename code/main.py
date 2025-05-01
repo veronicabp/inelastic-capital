@@ -19,17 +19,18 @@ reload(fd)
 reload(utils)
 
 # %%
-data_folder = os.path.join("..", "data")
+data_folder = os.path.join("..", "data", "inelastic-capital-data")
+file_path = f"{data_folder}/working/baci.p"
 
 # %% Match firms to products
 # mf.match_firms_products()
 
 # %% Load baci data, which is main dataset for analysis
-print("Loading BACI data")
-baci = utils.load_baci_data(data_folder)
-baci = baci[baci.exporter.isin(country_codes)].copy()
+# print("Loading BACI data")
+# baci = utils.load_baci_data(data_folder)
+# baci = baci[baci.exporter.isin(country_codes)].copy()
 
-baci.to_pickle(f"{data_folder}/working/baci.p")
+# baci.to_pickle(f"{data_folder}/working/baci.p")
 baci = pd.read_pickle(f"{data_folder}/working/baci.p")
 
 # Merge baci with naics-hs crosswalk
@@ -59,14 +60,14 @@ demand_shocks.initialize_all_demand_shocks()
 # %%
 results_HS6 = rr.RegressionResults(demand_shocks)
 results_HS6.run_baseline_regressions()
-# results_HS6.persistence()
+results_HS6.persistence()
 # %%
 results_HS4 = rr.RegressionResults(demand_shocks, agg_level="HS4")
 results_HS4.run_baseline_regressions()
 
 # %%
-results_naics = rr.RegressionResults(demand_shocks, agg_level="naics")
-results_naics.run_naics_regressions()
+# results_naics = rr.RegressionResults(demand_shocks, agg_level="naics")
+# results_naics.run_naics_regressions()
 
 # # %% Run country-by-country
 # elas_df = cc.get_country_results(demand_shocks, data_folder)
