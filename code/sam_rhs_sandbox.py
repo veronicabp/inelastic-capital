@@ -60,6 +60,10 @@ reload(utils)
 folder = "C:/Users/illge/Princeton Dropbox/Sam Barnett/inelastic_capital"
 data_folder = os.path.join("..", "data")
 
+
+
+
+
 #%% Get GDP, Exchange rate, and HS-NAICS crosswalk data
 gdp_data = load_gdp_data(data_folder)
 
@@ -69,7 +73,11 @@ exchange_rate_data = load_exchange_rate_data(data_folder)
 
 naics_hs_crosswalk = load_naics_hs_crosswalk(data_folder)
 
-# %% Get FRB data 
+
+
+
+
+# %% Get FRB data on capacity, utilization
 import pandas as pd
 
 def split_whitespace_column(df, col, n):
@@ -148,4 +156,23 @@ frb_utilization = df
 capacity_utilization = pd.merge(frb_capacity, frb_utilization, on=["year", "naics_code"])
 
 
+
+
+# %% FRB industrial production index 'INDPRO', by year 
+indpro_path = os.path.join(data_folder, "raw", "frb", "INDPRO.csv")
+df = pd.read_csv(indpro_path, sep=",", header=0) 
+#save first four digits of observtion date as year
+df["year"] = df["observation_date"].str[:4].astype(int)
+#collapse (mean) by year 
+df = (
+    df
+    .groupby("year", as_index=False)["INDPRO"]
+    .mean()
+    .rename(columns={"INDPRO": "mean_indpro"})
+)
+
+
+
+
 # %%
+
