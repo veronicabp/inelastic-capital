@@ -1,1 +1,0 @@
-# sam sandbox for inelastic capital RHS variable creation 
