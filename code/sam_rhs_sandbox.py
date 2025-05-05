@@ -2,7 +2,7 @@
 # conda environment: inelastic_capital
 
 
-# what I needed to pip, conda install that I didn't have 
+# what I needed to pip, conda install that I didn't have for replication ----------
 # ipykernel (vscode will do automatically)
 # notebook -- this was a pain, should manually install in conda env
 # pip install linearmodels # or conda install? 
@@ -13,6 +13,7 @@
 # pip install stargazer 
 # conda install requests 
 
+# what I pip/conda installed myself ---------- 
 
 #%%
 import os
@@ -50,7 +51,7 @@ print(sys.version); print(sys.executable); print(sys.path)
 
 # Also manually fixed BACI country codes in Excel  
 
-#%% Get GDP, Exchange rate, and HS-NAICS crosswalk data
+#%% Set "data" folder 
 import utils
 from utils import *
 
@@ -59,6 +60,7 @@ reload(utils)
 folder = "C:/Users/illge/Princeton Dropbox/Sam Barnett/inelastic_capital"
 data_folder = os.path.join("..", "data")
 
+#%% Get GDP, Exchange rate, and HS-NAICS crosswalk data
 gdp_data = load_gdp_data(data_folder)
 
 exchange_rate_data = load_exchange_rate_data(data_folder)   
@@ -67,4 +69,83 @@ exchange_rate_data = load_exchange_rate_data(data_folder)
 
 naics_hs_crosswalk = load_naics_hs_crosswalk(data_folder)
 
-# %% 
+# %% Get FRB data 
+import pandas as pd
+
+def split_whitespace_column(df, col, n):
+    """
+    Split df[col] (a whitespace‐separated string) into exactly n columns.
+    """
+    # 1) strip surrounding quotes
+    s = df[col].astype(str).str.strip('"')
+    # 2) split on any run of whitespace, expand into DataFrame
+    parts = s.str.split(r"\s+", expand=True)
+    # 3) pad (or truncate) to exactly n columns
+    parts = parts.reindex(columns=range(n), fill_value="")
+    # 4) rename
+    parts.columns = [f"{col}_{i+1}" for i in range(n)]
+    # 5) drop original and concat
+    df2 = pd.concat([df.drop(columns=[col]), parts], axis=1)
+    return df2
+
+fcapacity_path = os.path.join(data_folder, "raw", "frb", "fred_capacity.txt")
+futilization_path = os.path.join(data_folder, "raw", "frb", "fred_utilization.txt")
+
+# read in the capacity data ----------
+df = pd.read_csv(fcapacity_path, sep="\t", header=0) 
+df = split_whitespace_column(df, "B50001: Total index", 14)
+
+#rename B50001: Total index_2 to year 
+df.rename(columns={"B50001: Total index_2": "year"}, inplace=True)
+#drop any row where year is not a number
+df = df[pd.to_numeric(df["year"], errors="coerce").notnull()]
+#convert year to int
+df["year"] = df["year"].astype(int)
+
+#rename B50001: Total index_1 to NAICS code
+df.rename(columns={"B50001: Total index_1": "naics_code"}, inplace=True)
+
+#rename BS50001: Total index_`n' to capacity_`n-2'
+for n in range(3, 15):
+    df.rename(columns={f"B50001: Total index_{n}": f"capacity_{n-2}"}, inplace=True)
+#convert capacity_1 to capacity_12 to numeric
+for n in range(1, 13):
+    df[f"capacity_{n}"] = df[f"capacity_{n}"].astype(float)
+
+#average capacity_1 to capacity_12 in a new column called mean_capacity
+df["mean_capacity"] = df[[f"capacity_{i}" for i in range(1, 13)]].mean(axis=1)
+# #drop capacity_1 to capacity_12
+df.drop(columns=[f"capacity_{i}" for i in range(1, 13)], inplace=True)
+frb_capacity = df 
+
+# read in the utilization data ----------
+df = pd.read_csv(futilization_path, sep="\t", header=0)
+df = split_whitespace_column(df, "B50001: Total index", 14)
+
+#rename B50001: Total index_2 to year
+df.rename(columns={"B50001: Total index_2": "year"}, inplace=True)
+#drop any row where year is not a number
+df = df[pd.to_numeric(df["year"], errors="coerce").notnull()]
+#convert year to int
+df["year"] = df["year"].astype(int)
+
+#rename B50001: Total index_1 to NAICS code
+df.rename(columns={"B50001: Total index_1": "naics_code"}, inplace=True)
+#rename BS50001: Total index_`n' to utilization_`n-2'
+for n in range(3, 15):
+    df.rename(columns={f"B50001: Total index_{n}": f"utilization_{n-2}"}, inplace=True)
+#convert utilization_1 to utilization_12 to numeric
+for n in range(1, 13):
+    df[f"utilization_{n}"] = df[f"utilization_{n}"].astype(float)
+
+#average utilization_1 to utilization_12 in a new column called mean_utilization
+df["mean_utilization"] = df[[f"utilization_{i}" for i in range(1, 13)]].mean(axis=1)
+# #drop utilization_1 to utilization_12
+df.drop(columns=[f"utilization_{i}" for i in range(1, 13)], inplace=True)
+frb_utilization = df
+
+#Merge the two dataframes on year and naics_code
+capacity_utilization = pd.merge(frb_capacity, frb_utilization, on=["year", "naics_code"])
+
+
+# %%
