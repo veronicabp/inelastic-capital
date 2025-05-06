@@ -14,6 +14,7 @@
 # conda install requests 
 
 # what I pip/conda installed myself ---------- 
+# conda install xlrd
 
 #%%
 import os
@@ -76,13 +77,12 @@ naics_hs_crosswalk = load_naics_hs_crosswalk(data_folder)
 
 
 
-
 # %% Get FRB data on capacity, utilization
 import pandas as pd
 
 def split_whitespace_column(df, col, n):
     """
-    Split df[col] (a whitespace‐separated string) into exactly n columns.
+    Split df[col] (a whitespace-separated string) into exactly n columns.
     """
     # 1) strip surrounding quotes
     s = df[col].astype(str).str.strip('"')
@@ -158,6 +158,37 @@ capacity_utilization = pd.merge(frb_capacity, frb_utilization, on=["year", "naic
 
 
 
+#%% Import NAICS codes used by Boehm etal 2022 and get their 21 3-digit manufacturing codes
+naics_path = os.path.join(data_folder, "raw", "census", "2-digit_2012_Codes.xls")
+naics_codes = pd.read_excel(naics_path, sheet_name="tbl_2012_title_description_coun")
+
+#rename 2012 NAICS US Code to naics_code
+naics_codes.rename(columns={"2012 NAICS US   Code": "naics_code"}, inplace=True)
+
+#keep only length-3 naics_codes 
+naics_codes = naics_codes[naics_codes["naics_code"].astype(str).str.len() == 3]
+
+#merge capacity_utilization with naics_codes on naics_code; first strip naics_code in capcity_utilization of non-numeric characters
+capacity_utilization["naics_code"] = capacity_utilization["naics_code"].astype(str).str.extract(r"(\d+)")
+capacity_utilization = pd.merge(capacity_utilization, naics_codes, on="naics_code", how="left")
+
+#keep if length of naics_code is 3 and starts with 3, nonmissing naics_code
+capacity_utilization = capacity_utilization[
+    (capacity_utilization["naics_code"].astype(str).str.len() == 3) &
+    (capacity_utilization["naics_code"].astype(str).str.startswith("3")) &
+    (capacity_utilization["naics_code"].notnull())
+]
+
+#print levels of naics_code in capacity_utilization
+print(capacity_utilization["naics_code"].unique()) # 21 levels, as expected 
+
+# demean capacity and utilization by naics_code
+capacity_utilization["mean_capacity_demeaned"] = capacity_utilization.groupby("naics_code")["mean_capacity"].transform(lambda x: x - x.mean())
+capacity_utilization["mean_utilization_demeaned"] = capacity_utilization.groupby("naics_code")["mean_utilization"].transform(lambda x: x - x.mean())
+
+
+
+
 # %% FRB industrial production index 'INDPRO', by year 
 indpro_path = os.path.join(data_folder, "raw", "frb", "INDPRO.csv")
 df = pd.read_csv(indpro_path, sep=",", header=0) 
@@ -174,5 +205,11 @@ df = (
 
 
 
-# %%
+# %% BEA data for Shea instrument
 
+
+
+
+
+
+# %%
