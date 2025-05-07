@@ -74,9 +74,10 @@ exchange_rate_data = load_exchange_rate_data(data_folder)
 
 naics_hs_crosswalk = load_naics_hs_crosswalk(data_folder)
 
+ungdp_path = os.path.join(data_folder, "raw", "unstats", "un_gdp_constantLCU2015.csv")
+ungdp_data = pd.read_csv(ungdp_path, sep=",", header=0)
 
-
-
+# FRB ---------------------------------------------------
 # %% Get FRB data on capacity, utilization
 import pandas as pd
 
@@ -124,7 +125,7 @@ for n in range(1, 13):
 df["mean_capacity"] = df[[f"capacity_{i}" for i in range(1, 13)]].mean(axis=1)
 # #drop capacity_1 to capacity_12
 df.drop(columns=[f"capacity_{i}" for i in range(1, 13)], inplace=True)
-frb_capacity = df 
+frb_capacity = df.copy() 
 
 # read in the utilization data ----------
 df = pd.read_csv(futilization_path, sep="\t", header=0)
@@ -150,7 +151,7 @@ for n in range(1, 13):
 df["mean_utilization"] = df[[f"utilization_{i}" for i in range(1, 13)]].mean(axis=1)
 # #drop utilization_1 to utilization_12
 df.drop(columns=[f"utilization_{i}" for i in range(1, 13)], inplace=True)
-frb_utilization = df
+frb_utilization = df.copy()
 
 #Merge the two dataframes on year and naics_code
 capacity_utilization = pd.merge(frb_capacity, frb_utilization, on=["year", "naics_code"])
@@ -205,11 +206,111 @@ df = (
 
 
 
-# %% BEA data for Shea instrument
+#%% import iso codes 
+iso_df = load_iso_codes(data_folder) #new utils function
+print(iso_df.head())
 
 
 
+#%% Exports data from Schott 
+
+# get sic/naics concordance and weights 
+sic_path = os.path.join(data_folder, "raw", "original", "conc_sic87_naics97.xlsx")
+sic_naics = pd.read_excel(sic_path, sheet_name="Data")
+sic_naics = sic_naics[["sic87", "naics97", "ship8797"]]
+sic_naics["sic87"] = sic_naics["sic87"].astype(str)
+
+# pre-1988 exports data from .dta -------------------------------------
+path = os.path.join(data_folder, "raw", "original", "xm_sic87_72_105_20120424.dta")
+df = pd.read_stata(path, convert_categoricals=False)
+
+# keep wbcode year sic x 
+df = df[["wbcode", "year", "sic", "x"]]
+# rename x val_exports, tostring sic and keep pre-1988
+df.rename(columns={"x": "val_exports"}, inplace=True)
+df = df[df["val_exports"] != 0]
+df["sic"] = df["sic"].astype(int).astype(str)
+df = df[df["sic"] != "nan"]
+df = df[df["year"] <= 1988]
+
+#merge df many:many sic87 using sic_naics 
+df = pd.merge(df, sic_naics, left_on="sic", right_on="sic87", how="left")
+df["val_exports"] = df["val_exports"] * df["ship8797"] # weight by weights following Boehm 2022
+df["naics"] = df["naics97"].astype(str)
+df["naics3"] = df["naics"].str[:3]
+pre_1988_exports = (
+    df
+    .groupby(["year", "naics3", "wbcode"], as_index=False)["val_exports"]
+    .sum()
+)
+#convert from millions to USD 
+pre_1988_exports["val_exports"] = pre_1988_exports["val_exports"] * 1e6
+
+# post-1988 exports data from .dta -------------------------------------
+# for each year 1989 to 2024, read in the file exp_detl_yearly_`year'_12n.dta
+# collapse by naics3 
+# and append to df
+df = pd.DataFrame()   
+
+for year in range(89, 123):
+    path = os.path.join(
+        data_folder, "raw", "original", "annual_schott_legacy", f"exp_detl_yearly_{year}n", f"exp_detl_yearly_{year}n.dta"
+    )
+    df_temp = pd.read_stata(path, convert_categoricals=False)
+    df_temp = df_temp[["year", "all_val_yr", "naics", "cty_code"]]
+    df_temp.rename(columns={"all_val_yr": "val_exports"}, inplace=True)
+    df_temp["naics"] = df_temp["naics"].astype(str)
+    df_temp["naics3"] = df_temp["naics"].str[:3]
+    df_temp = (
+        df_temp
+        .groupby(["year", "naics3", "cty_code"], as_index=False)["val_exports"]
+        .sum()
+    )
+    # append to df
+    df = pd.concat([df, df_temp], ignore_index=True)
+
+#rename cty_code isonumber
+df.rename(columns={"cty_code": "isonumber"}, inplace=True)
+# merge m:1 isonumber using temp_files\isocodes.dta
+df["isonumber"] = df["isonumber"].astype(int).astype(str)
+df["isonumber"] = df["isonumber"].str.strip()
+df = pd.merge(df, iso_df, on="isonumber", how="left")
+# keep year naics3 val_exports wbcode
+df = df[["year", "naics3", "val_exports", "wbcode"]]
+
+post_1988_exports = df.copy()
+
+#append pre_1988_exports to post_1988_exports
+exports = pd.concat([pre_1988_exports, post_1988_exports], ignore_index=True)
+
+# rename wbcode country_abb, rename naics3 naics, rename val_exports exports
+exports.rename(columns={"wbcode": "country_abb", "naics3": "naics", "val_exports": "exports"}, inplace=True)
+# drop if naics == "", drop if naics == ".", drop if country_abb == "", drop if exports == ., drop if year == .
+exports = exports[exports["naics"] != ""]
+exports = exports[exports["naics"] != "."]
+exports = exports[exports["country_abb"] != ""]
+exports = exports[exports["country_abb"] != "."]
+exports = exports[exports["exports"] != "."]
+exports = exports[exports["exports"] != ""]
+exports = exports[exports["year"] != "."]
+exports = exports[exports["year"] != ""]
+
+# by naics year: egen tot_exp = total(exports)ex
+exports["tot_exp"] = exports.groupby(["naics", "year"])["exports"].transform("sum")
+exports["exp_share"] = exports["exports"] / exports["tot_exp"]
+#now we have export shares we need 
+#check exp_share sums to 1 within naics and year
+exports_check = exports.groupby(["naics", "year"])["exp_share"].sum().reset_index()
+exports_check = exports_check[exports_check["exp_share"] != 1]
+print(exports_check) # everything = 1 up to rounding error
+
+# BEA ---------------------------------------------------
+# %% import BEA raw data 
+leg_indgdp_path = os.path.join(data_folder, "raw", "bea", "GDPbyInd_II_1947-1997.xlsx")
+leg_usetables_path = os.path.join(data_folder, "raw", "bea", "use_tables_hist.xlsx")
+
+price_path = os.path.join(data_folder, "raw", "bea", "II_price_97_23.xlsx") 
+qty_path = os.path.join(data_folder, "raw", "bea", "II_qty_97_23.xlsx")
+usetables_path = os.path.join(data_folder, "raw", "bea", "bea_use_tables_97_23.csv")
 
 
-
-# %%

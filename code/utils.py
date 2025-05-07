@@ -308,6 +308,135 @@ def load_naics_hs_crosswalk(data_folder):
 
     return merge_keys
 
+def load_iso_codes(data_folder):
+    # 1) load census ISO‐numeric codes
+    iso_path = os.path.join(data_folder, "raw", "original", "iso_census.txt")
+    iso = (pd.read_csv(iso_path, sep="|", header=0))
+    #rename "Code" column "isonumber", rename "Name" column "country"
+    iso.columns = iso.columns.str.strip() 
+    iso.rename(columns={"Code" : "isonumber", "Name" : "country"}, inplace=True)
+    iso["isonumber"] = iso["isonumber"].str.strip()
+    iso["country"]   = iso["country"].str.strip()
+    iso = iso[iso["isonumber"].str.len() <= 4]       # drop overly long codes
+
+    # 2) load PWT country list
+    pwt_path = os.path.join(data_folder, "raw", "original", "pwt100.dta")
+    pwt = pd.read_stata(pwt_path, columns=["countrycode","country"])
+    pwt["country"]     = pwt["country"].str.strip()
+    pwt = pwt.drop_duplicates(subset="country")
+
+    # 3) harmonize PWT names to match census list
+    name_map = {
+      "Bolivia (Plurinational State of)": "Bolivia",
+      "Brunei Darussalam":                "Brunei",
+      "China, Hong Kong SAR":            "Hong Kong",
+      "China, Macao SAR":                "Macao",
+      "Congo":                           "Congo, Republic of the Congo",
+      "Curaçao":                         "Curacao",
+      "Côte d'Ivoire":                   "Cote d'Ivoire",
+      "D.R. of the Congo":               "Congo, Democratic Republic of the Congo (formerly Za",
+      "Denmark":                         "Denmark, except Greenland",
+      "Germany":                         "Germany (Federal Republic of Germany)",
+      "Iran (Islamic Republic of)":      "Iran",
+      "Lao People's DR":                 "Laos (Lao People's Democratic Republic)",
+      "Myanmar":                         "Burma (Myanmar)",
+      "Republic of Korea":               "South Korea (Republic of Korea)",
+      "Republic of Moldova":             "Moldova (Republic of Moldova)",
+      "Russian Federation":              "Russia",
+      "Sint Maarten (Dutch part)":       "Sint Maarten",
+      "St. Vincent and the Grenadines":  "Saint Vincent and the Grenadines",
+      "State of Palestine":              "West Bank administered by Israel",
+      "Syrian Arab Republic":            "Syria (Syrian Arab Republic)",
+      "U.R. of Tanzania: Mainland":      "Tanzania (United Republic of Tanzania)",
+      "United States":                   "United States of America",
+      "Venezuela (Bolivarian Republic of)": "Venezuela",
+      "Viet Nam":                        "Vietnam",
+      "Yemen":                           "Yemen (Republic of Yemen)",
+    }
+    pwt["country"] = pwt["country"].replace(name_map)
+
+    # 4) merge PWT ↔ census
+    df = pd.merge(
+        pwt, iso,
+        on="country",
+        how="left",
+        validate="1:1"
+    )
+
+    # 5) fill in any PWT codes that are still missing
+    manual_code_map = {
+      "Afghanistan":    "AFG",
+      "American Samoa": "ASM",
+      "Andorra":        "ADO",
+      "British Indian Ocean Territory": "GBR",
+      "Christmas Island (in the Indian Ocean)": "AUS",
+      "Cocos (Keeling) Islands":        "CRI",
+      "Cook Islands":                   "COK",
+      "Cuba":                            "CUB",
+      "Eritrea":                         "ERI",
+      "Falkland Islands (Islas Malvinas)": "ARG",
+      "Faroe Islands":                   "FRO",
+      "French Guiana":                   "GUF",
+      "French Polynesia":                "PYF",
+      "French Southern and Antarctic Lands": "FRA",
+      "Gaza Strip administered by Israel": "WBG",
+      "Gibraltar":                       "GIBRA",
+      "Greenland":                       "GRL",
+      "Guadeloupe":                      "GLP",
+      "Guam":                            "GUM",
+      "Heard Island and McDonald Islands": "AUS",
+      "Kiribati":                        "KIR",
+      "Kosovo":                          "KSV",
+      "Libya":                           "LBY",
+      "Liechtenstein":                   "LIE",
+      "Marshall Islands":                "MHL",
+      "Martinique":                      "MTQ",
+      "Mayotte":                         "MYT",
+      "Micronesia, Federated States of": "FSM",
+      "Monaco":                          "MCO",
+      "Nauru":                           "NRU",
+      "New Caledonia":                   "NCL",
+      "Niue":                            "NIU",
+      "Norfolk Island":                  "AUS",
+      "North Korea (Democratic People's Republic of Korea)": "PRK",
+      "Northern Mariana Islands":        "MNP",
+      "Palau":                           "PLW",
+      "Papua New Guinea":                "PNG",
+      "Pitcairn Islands":                "GBR",
+      "Puerto Rico":                     "PRI",
+      "Reunion":                         "REU",
+      "Saint Helena":                    "GBR",
+      "Saint Pierre and Miquelon":       "FRA",
+      "Samoa (Western Samoa)":           "WSM",
+      "San Marino":                      "SMR",
+      "Solomon Islands":                 "SLB",
+      "Somalia":                         "SOM",
+      "Svalbard and Jan Mayen":          "NOR",
+      "Timor-Leste":                     "TMP",
+      "Tokelau":                         "NZL",
+      "Tonga":                           "TON",
+      "Tuvalu":                          "TUV",
+      "United States Minor Outlying Islands": "USA",
+      "Vanuatu":                         "VUT",
+      "Virgin Islands of the United States": "VIR",
+      "Wallis and Futuna":               "FRA",
+      "Sint Maarten":                    "DNK",
+      "Curacao":                         "NLD",
+      "Romania":                         "ROM",
+      "West Bank administered by Israel": "WBG",
+      "Congo, Democratic Republic of the Congo (formerly Za": "ZAR",
+    }
+    mask = df["country"].isin(manual_code_map) 
+    df.loc[mask, "countrycode"] = df.loc[mask, "country"].map(manual_code_map)
+
+    # 6) drop any truly missing
+    df = df[df["countrycode"].notna() & (df["countrycode"] != "")]
+
+    # 7) final rename
+    df = df.rename(columns={"countrycode":"wbcode"})
+
+    return df[["country","wbcode","isonumber"]]
+
 
 ###### Functions for data manipulation
 def get_lag(df, group_cols, shift_col="value", shift_amt=1):
