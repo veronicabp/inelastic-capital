@@ -304,13 +304,90 @@ exports_check = exports.groupby(["naics", "year"])["exp_share"].sum().reset_inde
 exports_check = exports_check[exports_check["exp_share"] != 1]
 print(exports_check) # everything = 1 up to rounding error
 
-# BEA ---------------------------------------------------
-# %% import BEA raw data 
+
+
+
+# %%  BEA raw data paths
 leg_indgdp_path = os.path.join(data_folder, "raw", "bea", "GDPbyInd_II_1947-1997.xlsx")
 leg_usetables_path = os.path.join(data_folder, "raw", "bea", "use_tables_hist.xlsx")
 
 price_path = os.path.join(data_folder, "raw", "bea", "II_price_97_23.xlsx") 
 qty_path = os.path.join(data_folder, "raw", "bea", "II_qty_97_23.xlsx")
-usetables_path = os.path.join(data_folder, "raw", "bea", "bea_use_tables_97_23.csv")
+usetables_path = os.path.join(data_folder, "raw", "bea", "IOUse_Before_Redefinitions_PRO_1997-2023_Summary.xlsx")
+
+#%% Use tables 
+# for each year 1963 to 2023, just read in the appropriate sheet of use tables
+import sys, os, numpy as np, pandas as pd
+
+hist_xls = os.path.join(data_folder, "raw", "bea", "use_tables_hist.xlsx")
+post_xls = os.path.join(
+    data_folder, "raw", "bea",
+    "IOUse_Before_Redefinitions_PRO_1997-2023_Summary.xlsx"
+)
+out_dir  = os.path.join(data_folder, "temp_files")
+os.makedirs(out_dir, exist_ok=True)
+
+# ------------- 1968-1996 ------------------------------------------------
+for year in range(1968, 1997):
+    sheet = str(year)
+
+    # read header row and IO block for historical file
+    names = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="C:BO", skiprows=5, nrows=1, engine="openpyxl", na_values="...").to_numpy().flatten()
+    IO = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="C:BO", skiprows=7, nrows=65, engine="openpyxl", na_values="...").to_numpy()
+    FD = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="CG", skiprows=7, nrows=65, engine="openpyxl", na_values="...").to_numpy().flatten()  
+
+    # clean and compute totals
+    IO[np.isnan(IO)] = 0
+    total = IO.sum(axis=1) + FD
+    II    = len(total)
+
+    # demand-side shares ----------
+    C_p = IO / total                        # cost shares -- this is Gamma^c' in Boehm 2022. 
+    tmp = np.outer(1/total, FD)             # outer product of column vectors 1/py and FD
+    UDS = np.linalg.inv(np.eye(II) - C_p) * tmp # hademard 
+    DDS = IO / (total - FD)[:, None]
+    #write DDS and UDS to a combined csv file 
+    DDS_df = pd.DataFrame(DDS, columns=names, index=names) 
+    UDS_df = pd.DataFrame(UDS, columns=names, index=names)
+    
+    #reshape 
+    DDS_df = DDS_df.stack().reset_index()
+    DDS_df.columns = ["naics_source","naics_dest","DDS"]
+
+    UDS_df = UDS_df.stack().reset_index()
+    UDS_df.columns = ["naics_source", "naics_dest", "UDS"]
+
+    #merge and save
+    combined_df = pd.merge(DDS_df, UDS_df, on=["naics_source", "naics_dest"])
+    combined_df["year"] = year
+    combined_df.to_csv(os.path.join(out_dir, f"demand_shares_{year}.csv"), index=False)
+
+    # cost-side shares ----------
+    VA = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="C:BO", skiprows=75, nrows=1, engine="openpyxl", na_values="...").to_numpy().flatten()
+    total = IO.sum(axis=0) + VA
+    C_p   = IO.T / total #Gamma^s in Boehm 2022. 
+    tmp   = np.outer(1/total, VA) # outer product of column vectors 1/py and VA
+    UCS   = (np.linalg.inv(np.eye(II) - C_p) * tmp).T #hademard. we transpose because source and dest are flipped vs above 
+    DCS   = (IO / (total - VA)) 
+    #write DCS and UCS to a combined csv file 
+    DCS_df = pd.DataFrame(DCS, columns=names, index=names)
+    UCS_df = pd.DataFrame(UCS, columns=names, index=names)
+
+    #reshape 
+    DCS_df = DCS_df.stack().reset_index()
+    DCS_df.columns = ["naics_source","naics_dest","DCS"] 
+
+    UCS_df = UCS_df.stack().reset_index()
+    UCS_df.columns = ["naics_source", "naics_dest", "UCS"]
+
+    combined_df = pd.merge(DCS_df, UCS_df, on=["naics_source", "naics_dest"])
+    combined_df.to_csv(os.path.join(out_dir, f"cost_shares_{year}.csv"), index=False)
+
+# ------------- 1997‑2011 ------------------------------------------------
+#to-do
+
+print("Finished. CSVs are in:", out_dir)
 
 
+
+# %%

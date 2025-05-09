@@ -437,6 +437,18 @@ def load_iso_codes(data_folder):
 
     return df[["country","wbcode","isonumber"]]
 
+#NEED TO CHECK
+def write_table(src, dest, year, dmat, umat, prefix):
+    """Vectorise matrices and write a tidy CSV."""
+    II = dmat.shape[0]
+    table = pd.DataFrame({
+        "naics_source": np.repeat(src, II),
+        "naics_dest"  : np.tile (src,  II),
+        "year"        : year,
+        f"{prefix}DS" : dmat.ravel(order="F"),
+        f"U{prefix}S" : umat.ravel(order="F")
+    })
+    table.to_csv(dest, index=False)
 
 ###### Functions for data manipulation
 def get_lag(df, group_cols, shift_col="value", shift_amt=1):
