@@ -437,18 +437,33 @@ def load_iso_codes(data_folder):
 
     return df[["country","wbcode","isonumber"]]
 
-#NEED TO CHECK
-def write_table(src, dest, year, dmat, umat, prefix):
-    """Vectorise matrices and write a tidy CSV."""
-    II = dmat.shape[0]
-    table = pd.DataFrame({
-        "naics_source": np.repeat(src, II),
-        "naics_dest"  : np.tile (src,  II),
-        "year"        : year,
-        f"{prefix}DS" : dmat.ravel(order="F"),
-        f"U{prefix}S" : umat.ravel(order="F")
-    })
-    table.to_csv(dest, index=False)
+def clean_GDP_by_ind(dfname):
+    dfname["Description"] = dfname["Description"].str.strip()
+
+    dfname["Description"] = dfname["Description"].replace(
+        {
+            "National defense": "Federal general government (defense)",
+            "Nondefense": "Federal general government (nondefense)",
+            "Housing": "Housing Services",
+            "Other real estate": "Other Real Estate",
+        }
+    )
+    #first instance of "Government enterprises" is "Federal government enterprises", second instance is "State and local government enterprises"
+    #General government: "Federal general government", then "State and local general government"
+    for base in ["Government enterprises", "General government"]:
+        mask = (dfname["Description"] == base) & \
+               (dfname["Description"].duplicated(keep="first"))
+        dfname.loc[mask, "Description"] = base + ".1"
+
+    dfname["Description"] = dfname["Description"].replace(
+        {
+            "Government enterprises": "Federal government enterprises",
+            "Government enterprises.1": "State and local government enterprises",
+            "General government": "Federal general government",
+            "General government.1": "State and local general government",
+        }
+    )
+    return dfname    
 
 ###### Functions for data manipulation
 def get_lag(df, group_cols, shift_col="value", shift_amt=1):

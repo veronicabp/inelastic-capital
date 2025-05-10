@@ -206,13 +206,10 @@ df = (
 
 
 
-#%% import iso codes 
+#%% Exports data from Schott ----------------------------------------
+
 iso_df = load_iso_codes(data_folder) #new utils function
 print(iso_df.head())
-
-
-
-#%% Exports data from Schott 
 
 # get sic/naics concordance and weights 
 sic_path = os.path.join(data_folder, "raw", "original", "conc_sic87_naics97.xlsx")
@@ -220,7 +217,7 @@ sic_naics = pd.read_excel(sic_path, sheet_name="Data")
 sic_naics = sic_naics[["sic87", "naics97", "ship8797"]]
 sic_naics["sic87"] = sic_naics["sic87"].astype(str)
 
-# pre-1988 exports data from .dta -------------------------------------
+# pre-1988 exports data from .dta ----------
 path = os.path.join(data_folder, "raw", "original", "xm_sic87_72_105_20120424.dta")
 df = pd.read_stata(path, convert_categoricals=False)
 
@@ -246,7 +243,7 @@ pre_1988_exports = (
 #convert from millions to USD 
 pre_1988_exports["val_exports"] = pre_1988_exports["val_exports"] * 1e6
 
-# post-1988 exports data from .dta -------------------------------------
+# post-1988 exports data from .dta ----------
 # for each year 1989 to 2024, read in the file exp_detl_yearly_`year'_12n.dta
 # collapse by naics3 
 # and append to df
@@ -307,7 +304,7 @@ print(exports_check) # everything = 1 up to rounding error
 
 
 
-# %%  BEA raw data paths
+# %%  BEA I/O Tables ----------------------------------------
 leg_indgdp_path = os.path.join(data_folder, "raw", "bea", "GDPbyInd_II_1947-1997.xlsx")
 leg_usetables_path = os.path.join(data_folder, "raw", "bea", "use_tables_hist.xlsx")
 
@@ -328,7 +325,7 @@ post_xls = os.path.join(
 out_dir  = os.path.join(data_folder, "temp_files")
 os.makedirs(out_dir, exist_ok=True)
 
-# ------------- 1968-2023 ------------------------------------------------
+# ------------- 1968-2023 -------------
 for year in range(1968, 2024):
     sheet = str(year)
 
@@ -417,7 +414,7 @@ post_xls_boehm = os.path.join(
 out_dir  = os.path.join(data_folder, "temp_files")
 os.makedirs(out_dir, exist_ok=True)
 
-# ------------- 1997-2016 ------------------------------------------------
+# ------------- 1997-2016 -------------
 graphdf = []
 #empty df IOdiff_long to hold all the IO differences
 IOdiff_long = pd.DataFrame()
@@ -512,4 +509,204 @@ plt.savefig(os.path.join(out_dir, "abs_percent_diff_histogram.png"), dpi=300)
 
 
 
-# %%
+# %% BEA Intermediates input use time series -----------------------------------
+# (Chain Qty Index, "M" in Boehm 2022 Shea instrument)
+
+IOcodes = pd.read_excel(
+    os.path.join(data_folder, "raw", "bea", "IO_codes.xlsx"),
+    sheet_name="Sheet1",
+    header=5,
+    usecols="A:B",
+    nrows=71,
+    engine="openpyxl",
+) 
+IOcodes["Description"] = IOcodes["Description"].str.strip()
+
+IOcodes_hist = pd.read_excel(
+    os.path.join(data_folder, "raw", "bea", "IO_codes_aggregated.xlsx"),
+    sheet_name="Sheet1",
+    header=5,
+    usecols="A:B",
+    nrows=65,
+    engine="openpyxl",
+)
+IOcodes_hist["Description"] = IOcodes_hist["Description"].str.strip()
+
+#1997-2024 quantities index ----------
+quantities = pd.read_excel(
+    os.path.join(data_folder, "raw", "bea", "II_qty_97_24.xlsx"),
+    sheet_name="Sheet1",
+    skiprows=7,
+    header=0,
+    usecols="A:AE",
+    nrows=99,
+    engine="openpyxl",
+)
+quantities = quantities.drop(columns=["Line", "Unnamed: 2"])
+quantities.rename(columns={"Unnamed: 1": "Description"}, inplace=True)
+
+quantities["Description"] = quantities["Description"].str.strip()
+#check description column for duplicates
+duplicates_hist = quantities[quantities.duplicated(subset=["Description"], keep=False)]
+
+quantities = clean_GDP_by_ind(quantities)
+
+quantities = pd.merge(quantities, IOcodes, on="Description", how="inner")
+quantities.drop(columns=["Description"], inplace=True)
+quantities["naics_code"] = quantities["IO_Code"]
+
+# condense naics codes
+mappings = [
+    ("11",   ["111CA", "113FF"]),                     # Agriculture, forestry, and fishing
+    ("336",  ["3361MV", "3364OT"]),                   # Transportation equipment
+    ("311,2",["311FT"]),                              # Food/beverages
+    ("313,4",["313TT"]),                              # Textiles
+    ("315,6",["315AL"]),                              # Apparel/leather
+    ("44",   ["441", "445", "452", "4A0"]),            # Retail
+    ("48",   ["481","482","483","484","485","486","487OS","493"]),  # Transp & warehousing
+    ("52",   ["521CI","523","524","525"]),             # Finance
+    ("53",   ["HS","ORE","532RL"]),                   # Real estate & rental/leasing
+    ("54",   ["5411","5415","5412OP"]),                # Legal/professional services
+    ("71",   ["711AS","713"]),                        # Performing arts/entertainment
+]
+
+for new_code, patterns in mappings:
+    regex = "|".join(patterns)            # e.g. "111CA|113FF"
+    mask = quantities["naics_code"].str.contains(regex, na=False)
+    quantities.loc[mask, "naics_code"] = new_code
+
+quantities = quantities.replace("...", 0)
+
+#reshape long to time series
+quantities = quantities.melt(id_vars=["naics_code", "IO_Code"], var_name="year", value_name="qty_index")
+
+
+#1947-1997 quantities index ----------
+quantities_hist = pd.read_excel(
+    os.path.join(data_folder, "raw", "bea", "GDPbyInd_II_1947-1997.xlsx"),
+    sheet_name="ChainQtyIndexes",
+    skiprows=5,
+    header=0,
+    usecols="A:BA",
+    nrows=102,
+    engine="openpyxl",
+)
+
+quantities_hist = quantities_hist.drop(columns=["Line"])
+quantities_hist.rename(columns={"Unnamed: 1": "Description"}, inplace=True)
+
+quantities_hist["Description"] = quantities_hist["Description"].str.strip()
+#check description column for duplicates
+duplicates_hist = quantities_hist[quantities_hist.duplicated(subset=["Description"], keep=False)]
+
+quantities_hist = clean_GDP_by_ind(quantities_hist)
+
+quantities_hist = pd.merge(quantities_hist, IOcodes, on="Description", how="inner")
+quantities_hist.drop(columns=["Description"], inplace=True)
+quantities_hist["naics_code"] = quantities_hist["IO_Code"]
+
+#condense naics codes
+mappings = [
+    ("11",   ["111CA", "113FF"]),                     # Agriculture, forestry, and fishing
+    ("336",  ["3361MV", "3364OT"]),                   # Transportation equipment
+    ("311,2",["311FT"]),                              # Food/beverages/clothing/textiles
+    ("313,4",["313TT"]),                              # Textiles
+    ("315,6",["315AL"]),                              # Apparel/leather
+    ("44",   ["441", "445", "452", "4A0"]),            # Retail
+    ("48",   ["481","482","483","484","485","486","487OS","493"]),  # Transp & warehousing
+    ("52",   ["521CI","523","524","525"]),             # Finance
+    ("53",   ["HS","ORE","532RL"]),                   # Real estate & rental/leasing
+    ("54",   ["5411","5415","5412OP"]),                # Legal/professional services
+    ("71",   ["711AS","713"]),                        # Performing arts/entertainment
+]
+
+for new_code, patterns in mappings:
+    regex = "|".join(patterns)                        # e.g. "111CA|113FF"
+    mask = quantities_hist["naics_code"].str.contains(regex, na=False)
+    quantities_hist.loc[mask, "naics_code"] = new_code
+
+quantities_hist = quantities_hist.replace("...", 0)
+
+#reshape long to time series
+quantities_hist = quantities_hist.melt(id_vars=["naics_code", "IO_Code"], var_name="year", value_name="qty_index")
+
+
+
+
+# %% Compare the quantities in our time series data with Boehm's 
+# use "processed data" since it just takes the raw values; easier to merge 
+
+#make quant_BOEHM and quant_sam, two series indexed to same year (2017)
+#read stata dataset intermediate_ts_BOEHM.dta
+intermediate_ts_path = os.path.join(data_folder, "raw", "bea", "intermediate_ts_BOEHM.dta")
+intermediate_ts = pd.read_stata(intermediate_ts_path, convert_categoricals=False)
+
+# save new dataframe with only naics_code year quantity_index and only rows year == 2017
+intermediate_ts_ind = intermediate_ts[["IO_Code", "year", "quantity_index"]]
+intermediate_ts_ind = intermediate_ts_ind[intermediate_ts["year"] == 2017]
+#drop year column
+intermediate_ts_ind.drop(columns=["year"], inplace=True)
+intermediate_ts_ind.rename(columns={"quantity_index": "qty_2017"}, inplace=True)
+
+#merge intermediate_ts_ind with intermediate_ts on naics_code
+intermediate_ts = pd.merge(intermediate_ts, intermediate_ts_ind, on=["IO_Code"], how="left")
+intermediate_ts["qty_index_BOEHM"] = intermediate_ts["quantity_index"] / intermediate_ts["qty_2017"] * 100
+
+#quantites_sam  = quantities, rows where year <= 2017
+quantities["year"] = quantities["year"].astype(int)
+quantities_sam = quantities[quantities["year"] <= 2017].copy()
+
+quantities_sam = pd.merge(intermediate_ts, quantities_sam, on=["IO_Code", "year"], how="inner")
+
+quantities_sam["BOEHM_min_sam"] = (quantities_sam["qty_index_BOEHM"] - quantities_sam["qty_index"]) / quantities_sam["qty_index"] * 100
+
+#get time series by year: average absolute BOEHM_min_sam by year, SD of BOEHM_min_sam by year
+quantities_sam["year"] = quantities_sam["year"].astype(int)
+quantities_sam["BOEHM_min_sam_abs"] = np.abs(quantities_sam["BOEHM_min_sam"].astype(float))
+# collapse by year
+quantities_sam = (
+    quantities_sam
+    .groupby("year", as_index=False)[["BOEHM_min_sam", "BOEHM_min_sam_abs"]]
+    .agg(["mean", "median", "std"])
+)
+
+#plot BOEHM_min_sam mean, median, std by year
+plt.figure(figsize=(10, 6))
+plt.plot(quantities_sam["year"], quantities_sam["BOEHM_min_sam"]["mean"], label="Mean Percent Difference", color="blue")
+plt.plot(quantities_sam["year"], quantities_sam["BOEHM_min_sam"]["median"], label="Median Percent Difference", color="orange")
+plt.plot(quantities_sam["year"], quantities_sam["BOEHM_min_sam"]["std"], label="Standard Deviation of Percent Difference", color="green")
+plt.title("Percent Difference by Year")
+plt.xlabel("Year")
+plt.ylabel("Percent Difference")
+plt.legend()
+plt.xticks(quantities_sam["year"], rotation=45) 
+plt.tight_layout()
+#save to out_dir
+plt.savefig(os.path.join(out_dir, "avg_percent_diff_quantities_QbyInd.png"), dpi=300)
+
+#plot BOEHM_min_sam_abs mean, median, std by year
+plt.figure(figsize=(10, 6))
+plt.plot(quantities_sam["year"], quantities_sam["BOEHM_min_sam_abs"]["mean"], label="Mean Absolute Percent Difference", color="blue")
+plt.plot(quantities_sam["year"], quantities_sam["BOEHM_min_sam_abs"]["median"], label="Median Absolute Percent Difference", color="orange")
+plt.plot(quantities_sam["year"], quantities_sam["BOEHM_min_sam_abs"]["std"], label="Standard Deviation of Absolute Percent Difference", color="green")
+plt.title("Abs. Percent Difference by Year")
+plt.xlabel("Year")
+plt.ylabel("Abs. Percent Difference")
+plt.legend()
+plt.xticks(quantities_sam["year"], rotation=45)
+plt.tight_layout()
+#save to out_dir    
+plt.savefig(os.path.join(out_dir, "avg_abs_percent_diff_QbyInd.png"), dpi=300)
+
+
+
+
+# %% Building the actual Shea instrument 
+shea_threshold = 3
+
+#Cost Shares 
+#load in all the cost shares and append them. 
+
+
+
+
