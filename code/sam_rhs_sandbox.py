@@ -315,7 +315,7 @@ price_path = os.path.join(data_folder, "raw", "bea", "II_price_97_23.xlsx")
 qty_path = os.path.join(data_folder, "raw", "bea", "II_qty_97_23.xlsx")
 usetables_path = os.path.join(data_folder, "raw", "bea", "IOUse_Before_Redefinitions_PRO_1997-2023_Summary.xlsx")
 
-#%% Use tables 
+#%% Use tables -> four Shea vars to build J^Shea
 # for each year 1963 to 2023, just read in the appropriate sheet of use tables
 import sys, os, numpy as np, pandas as pd
 
@@ -324,17 +324,27 @@ post_xls = os.path.join(
     data_folder, "raw", "bea",
     "IOUse_Before_Redefinitions_PRO_1997-2023_Summary.xlsx"
 )
+
 out_dir  = os.path.join(data_folder, "temp_files")
 os.makedirs(out_dir, exist_ok=True)
 
-# ------------- 1968-1996 ------------------------------------------------
-for year in range(1968, 1997):
+# ------------- 1968-2023 ------------------------------------------------
+for year in range(1968, 2024):
     sheet = str(year)
 
-    # read header row and IO block for historical file
-    names = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="C:BO", skiprows=5, nrows=1, engine="openpyxl", na_values="...").to_numpy().flatten()
-    IO = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="C:BO", skiprows=7, nrows=65, engine="openpyxl", na_values="...").to_numpy()
-    FD = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="CG", skiprows=7, nrows=65, engine="openpyxl", na_values="...").to_numpy().flatten()  
+    if year <= 1996:
+        # read header row and IO block for historical file
+        names = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="C:BO", skiprows=5, nrows=1, engine="openpyxl", na_values="...").to_numpy().flatten()
+        IO = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="C:BO", skiprows=7, nrows=65, engine="openpyxl", na_values="...").to_numpy()
+        FD = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="CG", skiprows=7, nrows=65, engine="openpyxl", na_values="...").to_numpy().flatten()
+        VA = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="C:BO", skiprows=75, nrows=1, engine="openpyxl", na_values="...").to_numpy().flatten()
+    
+    if year >= 1997:
+        # read header row and IO block for post-1997 file
+        names = pd.read_excel(post_xls, sheet_name=sheet, header=None, usecols="C:BU", skiprows=5, nrows=1, engine="openpyxl", na_values="...").to_numpy().flatten()
+        IO = pd.read_excel(post_xls, sheet_name=sheet, header=None, usecols="C:BU", skiprows=7, nrows=71, engine="openpyxl", na_values="...").to_numpy()
+        FD = pd.read_excel(post_xls, sheet_name=sheet, header=None, usecols="CQ", skiprows=7, nrows=71, engine="openpyxl", na_values="...").to_numpy().flatten()
+        VA = pd.read_excel(post_xls, sheet_name=sheet, header=None, usecols="C:BU", skiprows=84, nrows=1, engine="openpyxl", na_values="...").to_numpy().flatten()
 
     # clean and compute totals
     IO[np.isnan(IO)] = 0
@@ -363,7 +373,6 @@ for year in range(1968, 1997):
     combined_df.to_csv(os.path.join(out_dir, f"demand_shares_{year}.csv"), index=False)
 
     # cost-side shares ----------
-    VA = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="C:BO", skiprows=75, nrows=1, engine="openpyxl", na_values="...").to_numpy().flatten()
     total = IO.sum(axis=0) + VA
     C_p   = IO.T / total #Gamma^s in Boehm 2022. 
     tmp   = np.outer(1/total, VA) # outer product of column vectors 1/py and VA
@@ -383,10 +392,123 @@ for year in range(1968, 1997):
     combined_df = pd.merge(DCS_df, UCS_df, on=["naics_source", "naics_dest"])
     combined_df.to_csv(os.path.join(out_dir, f"cost_shares_{year}.csv"), index=False)
 
-# ------------- 1997‑2011 ------------------------------------------------
-#to-do
-
 print("Finished. CSVs are in:", out_dir)
+
+
+
+# %% Compare sheets of use_tables_BOEHM.xlsx and "IOUse_Before_Redefinitions_PRO_1997-2023_Summary.xlsx" year by year 
+
+# (1) A plot of the average absolute percent difference by year
+# (2) A plot of the standard deviation of the percent difference by year
+# (3) A histogram of the percent difference (aggregate + by year)
+
+import sys, os, numpy as np, pandas as pd
+
+hist_xls = os.path.join(data_folder, "raw", "bea", "use_tables_hist.xlsx")
+post_xls = os.path.join(
+    data_folder, "raw", "bea",
+    "IOUse_Before_Redefinitions_PRO_1997-2023_Summary.xlsx"
+)
+post_xls_boehm = os.path.join(
+    data_folder, "raw", "bea",
+    "use_tables_BOEHM.xlsx"
+)
+
+out_dir  = os.path.join(data_folder, "temp_files")
+os.makedirs(out_dir, exist_ok=True)
+
+# ------------- 1997-2016 ------------------------------------------------
+graphdf = []
+#empty df IOdiff_long to hold all the IO differences
+IOdiff_long = pd.DataFrame()
+
+for year in range(1997, 2017):
+    sheet = str(year)
+
+    # read header row and IO block for historical file
+    IO_me = pd.read_excel(post_xls, sheet_name=sheet, header=None, usecols="C:BO", skiprows=7, nrows=71, engine="openpyxl", na_values="...").to_numpy()
+    IO_boehm = pd.read_excel(post_xls_boehm, sheet_name=sheet, header=None, usecols="C:BO", skiprows=7, nrows=71, engine="openpyxl", na_values="...").to_numpy()
+
+    # IO_me - IO_boehm 
+    IO_diff = (IO_me - IO_boehm) / IO_boehm * 100
+    # take the mean of the absolute value of the difference across all rows and columns, ignorning NaN values
+    #replace inf with NaN
+    IO_diff[np.isinf(IO_diff)] = np.nan
+    mean_diff = np.nanmean(np.abs(IO_diff))
+    #median of the absolute value of the difference across all rows and columns, ignorning NaN values
+    median_diff = np.nanmedian(np.abs(IO_diff))
+
+    #std of the absolute value of the difference across all rows and columns, ignorning NaN values
+    std_diff = np.nanstd(np.abs(IO_diff))
+
+    #fill graphdf with year, mean_diff, median_diff, std_diff
+    graphdf.append([year, mean_diff, median_diff, std_diff])
+
+    #convert IO_diff to a dataframe
+    IO_diff = pd.DataFrame(IO_diff)
+    IO_diff["year"] = year
+    #append IO_diff to empty dataframe IOdiff_long
+    IOdiff_long = pd.concat([IOdiff_long, IO_diff], ignore_index=True)
+    
+graphdf = pd.DataFrame(graphdf, columns=["year", "mean_diff", "median_diff", "std_diff"])
+
+# (1) A plot of the average absolute percent difference by year
+# (2) A plot of the standard deviation of the percent difference by year
+import matplotlib.pyplot as plt
+import seaborn as sns   
+
+sns.set_theme(style="whitegrid")
+plt.figure(figsize=(10, 6)) 
+plt.plot(graphdf["year"], graphdf["mean_diff"], label="Mean Absolute Percent Difference", color="blue")
+plt.plot(graphdf["year"], graphdf["median_diff"], label="Median Absolute Percent Difference", color="orange")   
+
+plt.plot(graphdf["year"], graphdf["std_diff"], label="Standard Deviation of Absolute Percent Difference", color="green")
+plt.title("Average Absolute Percent Difference by Year")
+plt.xlabel("Year")
+plt.ylabel("Average Absolute Percent Difference")
+plt.legend()
+plt.xticks(graphdf["year"], rotation=45)
+plt.tight_layout()
+plt.savefig(os.path.join(out_dir, "avg_abs_percent_diff.png"), dpi=300)
+
+#now plotting just the mean_diff and median_diff
+plt.figure(figsize=(10, 6)) 
+plt.plot(graphdf["year"], graphdf["mean_diff"], label="Mean Absolute Percent Difference", color="blue")
+plt.plot(graphdf["year"], graphdf["median_diff"], label="Median Absolute Percent Difference", color="orange")
+
+plt.title("Average Absolute Percent Difference by Year")
+plt.xlabel("Year")
+plt.ylabel("Average Absolute Percent Difference")
+plt.legend()
+plt.xticks(graphdf["year"], rotation=45)
+plt.tight_layout()
+#make y-axis start at 0     
+plt.ylim(0, 150)
+plt.savefig(os.path.join(out_dir, "avg_abs_percent_diff_mean_median.png"), dpi=300)
+
+
+# (3) A histogram of the percent difference (aggregate + by year)
+IOdiff_long = IOdiff_long.drop(columns=["year"])
+IOdiff_long = IOdiff_long.melt(var_name="naics", value_name="IO_diff") #note: this label not =naics
+IOdiff_long = IOdiff_long[IOdiff_long["IO_diff"].notnull()]
+IOdiff_long = IOdiff_long[IOdiff_long["IO_diff"] <= 1000] # there are several outliers
+IOdiff_long["IO_diff"] = np.abs(IOdiff_long["IO_diff"])
+#plot histogram of IO_diff
+
+plt.figure(figsize=(10, 6))
+plt.hist(IOdiff_long["IO_diff"], bins=50, color="blue", alpha=0.7)  
+
+plt.title("Histogram of Absolute Percent Difference")
+plt.xlabel("Absolute Percent Difference")
+
+plt.ylabel("Frequency")
+plt.xticks(rotation=45)
+
+plt.tight_layout()
+#save to out_dir    
+plt.savefig(os.path.join(out_dir, "abs_percent_diff_histogram.png"), dpi=300)
+
+
 
 
 
