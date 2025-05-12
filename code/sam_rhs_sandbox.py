@@ -330,19 +330,24 @@ for year in range(1968, 2024):
     sheet = str(year)
 
     if year <= 1996:
-        # read header row and IO block for historical file
+        # read header row and IO block for historical file. fill NAs with 0 as Boehm (2022).
         names = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="C:BO", skiprows=5, nrows=1, engine="openpyxl", na_values="...").to_numpy().flatten()
-        IO = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="C:BO", skiprows=7, nrows=65, engine="openpyxl", na_values="...").to_numpy()
+        IO = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="C:BO", skiprows=7, nrows=65, engine="openpyxl", na_values="...").fillna(0).to_numpy()
         FD = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="CG", skiprows=7, nrows=65, engine="openpyxl", na_values="...").to_numpy().flatten()
         VA = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="C:BO", skiprows=75, nrows=1, engine="openpyxl", na_values="...").to_numpy().flatten()
-    
+        EXP = pd.read_excel(hist_xls, sheet_name=sheet, header=None, usecols="BV", skiprows=7, nrows=65, engine="openpyxl", na_values="...").fillna(0).to_numpy() 
+        #GFG scaling for historical data only. Starts as 75 rows and 86 cols but we just need a scalar, the value of one cell / another. This is start of a01_construct_sample.do 
+        GFGSCL = pd.read_excel(hist_xls, sheet_name=sheet, header=0, usecols="A:CH", skiprows=6, nrows=70, engine="openpyxl", na_values="...").fillna(0)
+        # make GFGSCL the value of (row: GFG, column National Defense: Consumption expenditures) / (row: GFG, column Total Commodity Output)
+        GFGSCL = GFGSCL["National defense: Consumption expenditures"][GFGSCL["IOCode"] == "GFG"] / GFGSCL["Total Commodity Output"][GFGSCL["IOCode"] == "GFG"]
+
     if year >= 1997:
-        # read header row and IO block for post-1997 file
+        # read header row and IO block for post-1997 file. fill NAs with 0 as Boehm (2022).
         names = pd.read_excel(post_xls, sheet_name=sheet, header=None, usecols="C:BU", skiprows=5, nrows=1, engine="openpyxl", na_values="...").to_numpy().flatten()
-        IO = pd.read_excel(post_xls, sheet_name=sheet, header=None, usecols="C:BU", skiprows=7, nrows=71, engine="openpyxl", na_values="...").to_numpy()
+        IO = pd.read_excel(post_xls, sheet_name=sheet, header=None, usecols="C:BU", skiprows=7, nrows=71, engine="openpyxl", na_values="...").fillna(0).to_numpy()
         FD = pd.read_excel(post_xls, sheet_name=sheet, header=None, usecols="CQ", skiprows=7, nrows=71, engine="openpyxl", na_values="...").to_numpy().flatten()
         VA = pd.read_excel(post_xls, sheet_name=sheet, header=None, usecols="C:BU", skiprows=84, nrows=1, engine="openpyxl", na_values="...").to_numpy().flatten()
-
+        EXP = pd.read_excel(post_xls, sheet_name=sheet, header=None, usecols="CC", skiprows=7, nrows=71, engine="openpyxl", na_values="...").fillna(0).to_numpy() 
     # clean and compute totals
     IO[np.isnan(IO)] = 0
     total = IO.sum(axis=1) + FD
@@ -378,6 +383,15 @@ for year in range(1968, 2024):
     #write DCS and UCS to a combined csv file 
     DCS_df = pd.DataFrame(DCS, columns=names, index=names)
     UCS_df = pd.DataFrame(UCS, columns=names, index=names)
+    # Sji_df = pd.DataFrame(C_p, columns=names, index=names) #i's sales shares to j
+    IOT_df = pd.DataFrame(IO.T, columns=names, index=names) #later, will use in i's sales shares to j
+    totalsq = np.outer(total, np.ones(II))
+    total_df = pd.DataFrame(totalsq, columns=names, index=names) #later, will use in i's sales shares to j
+    #exports is single col (naics_source)
+    EXP_df = pd.DataFrame(EXP, index=names)
+    EXP_df.rename(columns={0: "exp"}, inplace=True)
+    EXP_df = EXP_df.reset_index()
+    EXP_df.rename(columns={"index": "naics_source"}, inplace=True)
 
     #reshape 
     DCS_df = DCS_df.stack().reset_index()
@@ -386,7 +400,17 @@ for year in range(1968, 2024):
     UCS_df = UCS_df.stack().reset_index()
     UCS_df.columns = ["naics_source", "naics_dest", "UCS"]
 
+    IOT_df = IOT_df.stack().reset_index()
+    IOT_df.columns = ["naics_dest", "naics_source", "IOT"] #flip indices to get Sji, i's sales shares to j, later
+    IOT_df["IOT"][IOT_df["naics_source"]=="GFG"] = IOT_df["IOT"][IOT_df["naics_source"]=="GFG"] * GFGSCL  #rescale by GFGSCL    
+
+    total_df = total_df.stack().reset_index()
+    total_df.columns = ["naics_dest", "naics_source", "total"] #flip indices to get Sji, i's sales shares to j, later
+
     combined_df = pd.merge(DCS_df, UCS_df, on=["naics_source", "naics_dest"])
+    combined_df = pd.merge(combined_df, IOT_df, on=["naics_source", "naics_dest"])
+    combined_df = pd.merge(combined_df, total_df, on=["naics_source", "naics_dest"])
+    combined_df = pd.merge(combined_df, EXP_df, on=["naics_source"])
     combined_df.to_csv(os.path.join(out_dir, f"cost_shares_{year}.csv"), index=False)
 
 print("Finished. CSVs are in:", out_dir)
@@ -630,6 +654,10 @@ quantities_hist = quantities_hist.replace("...", 0)
 #reshape long to time series
 quantities_hist = quantities_hist.melt(id_vars=["naics_code", "IO_Code"], var_name="year", value_name="qty_index")
 
+#append quantities to non-1997-quantities_hist 
+quantities_hist = quantities_hist[quantities_hist["year"] != "1997"].copy()
+quantities_full = pd.concat([quantities_hist, quantities], ignore_index=True)
+quantities_full = quantities_full.rename(columns={"naics_code": "naics_dest"})
 
 
 
@@ -706,7 +734,162 @@ shea_threshold = 3
 
 #Cost Shares 
 #load in all the cost shares and append them. 
+cost_shares = pd.DataFrame()
+for year in range(1968, 2024):
+    cost_shares_temp = pd.read_csv(os.path.join(out_dir, f"cost_shares_{year}.csv"))
+    cost_shares_temp["year"] = year
+    cost_shares = pd.concat([cost_shares, cost_shares_temp], ignore_index=True)
+
+#Demand Shares
+#load in all the demand shares and append them.
+demand_shares = pd.DataFrame()
+for year in range(1968, 2024):
+    demand_shares_temp = pd.read_csv(os.path.join(out_dir, f"demand_shares_{year}.csv"))
+    demand_shares_temp["year"] = year
+    demand_shares = pd.concat([demand_shares, demand_shares_temp], ignore_index=True)
+
+#the four stats we need are: dcs_ij, ucs_ij, dds_ji, uds_ji 
+#then take for each industry i: J^Shea_{it} = j: min{dds_{jit}, uds_{jit}} / max{ucs_{ijt}, dcs_{ijt}, ucs_{jit}, dcs_{jit}} > 3 
+shea_full = pd.merge(cost_shares, demand_shares, on=["naics_source", "naics_dest", "year"], how='left')
+
+#the below processing ignores Sji; this follows Boehm
+shareslist = ["DCS", "UCS", "DDS", "UDS"]
+for share in shareslist:
+    shea_full[share][shea_full[share].isnull()] = 0  
+
+#A) we have dds_ji, uds_ji, dcs_ij, ucs_ij; we need dcs_ji, ucs_ji
+shea_C_ji = shea_full.copy()
+shea_C_ji.rename(columns={"naics_source": "naics_dest", "naics_dest": "naics_source"}, inplace=True)
+shea_C_ji.drop(columns=["DDS", "UDS", "IOT", "total", "exp"], inplace=True)
+shea_C_ji.rename(columns={"DCS": "DCS_ji", "UCS": "UCS_ji"}, inplace=True)
+#merge the two dataframes on naics_source and naics_dest and year
+shea_full = pd.merge(shea_full, shea_C_ji, on=["naics_source", "naics_dest", "year"], how='left')
+
+# keep if substr(naics_source,1,1) == "3"
+shea_full = shea_full[shea_full["naics_source"].str.startswith("3")]
+
+#stat2 = min(dds,uds)/max(dcs,ucs,dcs_sfd,ucs_sfd). Boehm et al also construct simpler "original Shea" ver, but we care about this one
+shea_full["stat2"] = np.minimum(shea_full["DDS"], shea_full["UDS"]) / np.maximum.reduce([shea_full["DCS"], shea_full["UCS"], shea_full["DCS_ji"], shea_full["UCS_ji"]])
+
+#replace as 0 if any of the values are negative.  
+shea_full["stat2"] = np.where(
+    (shea_full["stat2"] < 0) | (shea_full["DDS"] < 0) | (shea_full["UDS"] < 0) | (shea_full["DCS"] < 0) | (shea_full["UCS"] < 0) | (shea_full["DCS_ji"] < 0) | (shea_full["UCS_ji"] < 0), 0, shea_full["stat2"]
+)
+
+shea_full["LJShea"] = (shea_full["stat2"] > shea_threshold).astype(int) #Defining JShea
+
+#replace year = year + 1 # so now we have JShea_{it-1} 
+shea_full["year"] = shea_full["year"].astype(int) + 1
+
+#B) fix NAICS codes ala "M" construction, line 608
+#condense naics codes
+mappings = [
+    ("11",   ["111CA", "113FF"]),                     # Agriculture, forestry, and fishing
+    ("336",  ["3361MV", "3364OT"]),                   # Transportation equipment
+    ("311,2",["311FT"]),                              # Food/beverages/clothing/textiles
+    ("313,4",["313TT"]),                              # Textiles
+    ("315,6",["315AL"]),                              # Apparel/leather
+    ("44",   ["441", "445", "452", "4A0"]),            # Retail
+    ("48",   ["481","482","483","484","485","486","487OS","493"]),  # Transp & warehousing
+    ("52",   ["521CI","523","524","525"]),             # Finance
+    ("53",   ["HS","ORE","532RL"]),                   # Real estate & rental/leasing
+    ("54",   ["5411","5415","5412OP"]),                # Legal/professional services
+    ("71",   ["711AS","713"]),                        # Performing arts/entertainment
+]
+
+for new_code, patterns in mappings:
+    regex = "|".join(patterns)                        # e.g. "111CA|113FF"
+    mask = shea_full["naics_source"].str.contains(regex, na=False)
+    shea_full.loc[mask, "naics_source"] = new_code
+
+
+#C) collapse min within each naics_code, naics_dest, and year; S_ji comes back # 72k -> 68k
+shea_full = (
+    shea_full
+    .groupby(["naics_source", "naics_dest", "year"], as_index=False)
+    .agg({"LJShea": "min", "IOT": "sum", "total": "sum", "exp": "sum"})
+)
+
+#D) split "311,2" "313,4", and "315,6" into separate rows: 311, 312, 313, 314, 315, 316, copying all other columns
+split_mapping = {
+    "311,2": ["311", "312"],
+    "313,4": ["313", "314"],
+    "315,6": ["315", "316"]
+}
+
+'''
+The below code:
+1.Defines a split_mapping dictionary for the naics_source codes you want to split and their corresponding new codes.
+2.Creates a temporary column naics_source_temp. For each row:
+-If naics_source is one of the keys in split_mapping (e.g., "311,2"), naics_source_temp gets the list of new codes (e.g., ["311", "312"]).
+-Otherwise, naics_source_temp gets the original naics_source value wrapped in a list (e.g., ["some_other_code"]) to ensure explode works correctly for all rows.
+3.shea_full.explode("naics_source_temp") then transforms each row with a list in naics_source_temp into multiple rows, one for each item in the list, duplicating all other column values.
+4.The original naics_source column is updated with the new, split values from naics_source_temp.
+'''
+# Apply the mapping: if a naics_source is in split_mapping, it becomes a list. Otherwise, wrap it in a list.
+shea_full["naics_source_temp"] = shea_full["naics_source"].apply(lambda x: split_mapping.get(x, [x]))
+# Explode the DataFrame on the temporary column
+shea_full = shea_full.explode("naics_source_temp")
+# Assign the exploded values back to 'naics_source' and drop the temporary column
+shea_full["naics_source"] = shea_full["naics_source_temp"]
+shea_full.drop(columns=["naics_source_temp"], inplace=True)
+
+shea_full["sales_sh"] = shea_full["IOT"] / shea_full["total"] # sales shares sj,i,t of industry i to buyer j; adj as in a01_construct_sample.do
+shea_full["exp_sh"] = shea_full["exp"] / shea_full["total"] # export shares sj,i,t of industry i to buyer j
+#Now we have Indic{i \in JShea_{i,t-1}}, sales_sh s_{j,i,t-1}, exp_sh s_{j,i,t-1} (used in the WID and exchange rate instruments)
+
+# collapse not necssary given differences in construction (I built without final use categories)
+shea_full.rename(columns={"sales_sh": "Lsales_sh"}, inplace=True) # since we alr did year = year + 1
+shea_full.rename(columns={"exp_sh": "Lexp_sh"}, inplace=True) 
+
+#CHECK: count unique levels of naics_source in shea_full
+unique_naics_source = shea_full["naics_source"].nunique()
+print("Unique naics_source in shea_full:", unique_naics_source) #21, good
+# In replication procedure, we are at end of a04_construct_sample.do and did some scaling at top of a01_construct_sample.do -----
+# Make Boehm's Dln_M_shea_inst. shea full has sales shares, export shares, and JShea; quantities full has M 
+
+# start with quantities_full: drop everything where naics_dest first char is G 
+quantities_forshea = quantities_full[quantities_full["naics_dest"].str.startswith("3")]
+#drop naics dest
+quantities_forshea = quantities_forshea.drop(columns=["naics_dest"])
+#rename IO_code to naics_dest
+quantities_forshea = quantities_forshea.rename(columns={"IO_Code": "naics_dest"})
+#drop if year <= 1963
+quantities_forshea["year"] = quantities_forshea["year"].astype(int)
+quantities_forshea = quantities_forshea[quantities_forshea["year"] > 1963]
+#by naics_dest: generate percent change in qty_index
+quantities_forshea["Dln_M"] = quantities_forshea.groupby("naics_dest")["qty_index"].pct_change() * 100
+
+#In Boehm 2022 code: Only 19 "destination" industries for their Shea inst, but 21 sources. 
+#I think this is just imputing the "quantities" for those industries; assumption is that changes in M for those industries are equal.
+shea_calc = pd.merge(shea_full, quantities_forshea, on=["naics_dest", "year"], how="inner")
+
+shea_calc["Dln_M_shea_inst2"] = shea_calc["Lsales_sh"] * shea_calc["Dln_M"] * shea_calc["LJShea"] #Shea instrument
+#collapse (sum) by naics_source and year
+shea_calc["total_by_naicsyear"] = 1
+shea_calc = (
+    shea_calc
+    .groupby(["naics_source", "year"], as_index=False)
+    .agg({"Dln_M_shea_inst2": "sum", "LJShea": "sum", "total_by_naicsyear": "sum"})
+)
+
+#share of partner-year observations that are LJShea for each naics_source
+#collapse (sum) by naics_source and year: LJShea and total_by_naicsyear
+shJS_by_i = (
+    shea_calc
+    .groupby(["naics_source"], as_index=False)
+    .agg({"LJShea": "sum", "total_by_naicsyear": "sum"})
+)
+shJS_by_i["LJShea"] = shJS_by_i["LJShea"] / shJS_by_i["total_by_naicsyear"] # share of partner-year observations that are LJShea for each naics_source
+#8 with no partner-year obs that are LJShea, compared with 6 in Boehm 2022.
+
+
+# %% Main sample 
+
+#Everything is winsorized at 1% and 99%
+#Everything *that enters interaction terms* is demeaned. 
 
 
 
 
+# %%
