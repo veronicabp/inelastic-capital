@@ -864,16 +864,16 @@ quantities_forshea["Dln_M"] = quantities_forshea.groupby("naics_dest")["qty_inde
 #I think this is just imputing the "quantities" for those industries; assumption is that changes in M for those industries are equal.
 shea_calc = pd.merge(shea_full, quantities_forshea, on=["naics_dest", "year"], how="inner")
 
-shea_calc["Dln_M_shea_inst2"] = shea_calc["Lsales_sh"] * shea_calc["Dln_M"] * shea_calc["LJShea"] #Shea instrument
+shea_calc["Dln_M_shea_inst2"] = shea_calc["Lsales_sh"] * shea_calc["Dln_M"] * shea_calc["LJShea"] 
 #collapse (sum) by naics_source and year
 shea_calc["total_by_naicsyear"] = 1
 shea_calc = (
     shea_calc
     .groupby(["naics_source", "year"], as_index=False)
     .agg({"Dln_M_shea_inst2": "sum", "LJShea": "sum", "total_by_naicsyear": "sum"})
-)
+) #Shea instrument is Dln_M_shea_inst2 in shea_calc
 
-#share of partner-year observations that are LJShea for each naics_source
+#CHECK: share of partner-year observations that are LJShea for each naics_source
 #collapse (sum) by naics_source and year: LJShea and total_by_naicsyear
 shJS_by_i = (
     shea_calc
@@ -883,6 +883,20 @@ shJS_by_i = (
 shJS_by_i["LJShea"] = shJS_by_i["LJShea"] / shJS_by_i["total_by_naicsyear"] # share of partner-year observations that are LJShea for each naics_source
 #8 with no partner-year obs that are LJShea, compared with 6 in Boehm 2022.
 
+
+#%% Export instrument 
+#first: export shares 
+
+#exports: keep only naics where first character is 3
+exports = exports[exports["naics"].str.startswith("3")]
+#rename exp_share Lexp_share
+exports.rename(columns={"exp_share": "Lexp_share", "naics": "naics_source"}, inplace=True)
+#year = year + 1
+exports["year"] = exports["year"].astype(int) + 1
+
+exports_calc = pd.merge(exports, shea_full, on=["naics_source", "year"], how="inner")
+#drop naics_year
+exports_calc = exports_calc.drop(columns=["naics_year"])
 
 # %% Main sample 
 
