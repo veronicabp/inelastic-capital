@@ -226,17 +226,20 @@ def load_bea_io_data(data_folder):
 
     def compute_demand_shares(IO, FD):
         total = IO.sum(axis=1) + FD
-        C_p = IO / total[:, None]
+        C_p = IO / total[None, :]
         UDS = np.linalg.inv(np.eye(len(total)) - C_p) * np.outer(1 / total, FD)
-        DDS = IO / (total - FD)[:, None]
+
+        # avoid divide by zero invalid value warnings
+        with np.errstate(divide="ignore", invalid="ignore"):
+            DDS = IO / (total - FD)[:, None]
         return DDS, UDS
 
     def compute_cost_shares(IO, VA, GFGSCL=None, gfg_source_index=None):
         total = IO.sum(axis=0) + VA
         II = IO.shape[0]
-        C_p = IO.T / total[:, None]
-        UCS = (np.linalg.inv(np.eye(II) - C_p) * np.outer(1 / total, VA)).T
-        DCS = IO / (total - VA)
+        C_p = IO / total[:, None]
+        UCS = np.linalg.inv(np.eye(II) - C_p.T) * VA[None, :] / total[:, None]
+        DCS = (IO / (total - VA)).T
         # if historical, apply GFG scaling to IOT where source is GFG
         IOT = IO.T.copy()
         if GFGSCL is not None:
