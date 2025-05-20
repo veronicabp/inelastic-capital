@@ -31,9 +31,7 @@ from linearmodels.panel.model import MissingValueWarning
 
 warnings.filterwarnings("ignore", category=MissingValueWarning)
 
-data_folder = os.path.join("..", "data")
 figures_folder = "/Users/vbp/Princeton Dropbox/Veronica Backer Peral/Apps/Overleaf/Inelastic Capital/Figures"
-
 klms_folder = "/Users/vbp/Princeton Dropbox/Veronica Backer Peral/Princeton/MianSufiRoll/round2_response/data_2024_update/data"
 
 # %% OECD country codes
@@ -774,6 +772,36 @@ def binscatter_plot(
 
     if filename:
         plt.savefig(os.path.join(figures_folder, filename), bbox_inches="tight")
+
+
+def clean_GDP_by_ind(dfname):
+    dfname["Description"] = dfname["Description"].str.strip()
+
+    dfname["Description"] = dfname["Description"].replace(
+        {
+            "National defense": "Federal general government (defense)",
+            "Nondefense": "Federal general government (nondefense)",
+            "Housing": "Housing Services",
+            "Other real estate": "Other Real Estate",
+        }
+    )
+    # first instance of "Government enterprises" is "Federal government enterprises", second instance is "State and local government enterprises"
+    # General government: "Federal general government", then "State and local general government"
+    for base in ["Government enterprises", "General government"]:
+        mask = (dfname["Description"] == base) & (
+            dfname["Description"].duplicated(keep="first")
+        )
+        dfname.loc[mask, "Description"] = base + ".1"
+
+    dfname["Description"] = dfname["Description"].replace(
+        {
+            "Government enterprises": "Federal government enterprises",
+            "Government enterprises.1": "State and local government enterprises",
+            "General government": "Federal general government",
+            "General government.1": "State and local general government",
+        }
+    )
+    return dfname
 
 
 # %%

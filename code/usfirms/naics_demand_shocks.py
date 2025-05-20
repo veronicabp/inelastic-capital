@@ -1,7 +1,3 @@
-from utils import *
-import utils
-
-
 def load_frb_data(data_folder):
     """
     Load data from the FRB on capacity and utilization rates
@@ -171,7 +167,7 @@ def load_schott_exports(data_folder):
     return exports
 
 
-def load_bea_io_data(data_folder):
+def construct_bea_shares(data_folder):
     """
     Load data from the BEA on input-output tables
     """
@@ -190,13 +186,15 @@ def load_bea_io_data(data_folder):
 
     ERA_CONFIG = {
         "hist": {
-            "years": range(1968, 1997),
+            "years": range(1970, 1997),
             "io": dict(usecols="C:BO", skiprows=7, nrows=65),
             "names": dict(usecols="C:BO", skiprows=5, nrows=1),
             "fd": dict(usecols="CG", skiprows=7, nrows=65),
             "va": dict(usecols="C:BO", skiprows=75, nrows=1),
             "exp": dict(usecols="BV", skiprows=7, nrows=65),
             "gfg": dict(usecols="A:CH", skiprows=6, nrows=70),
+            "full_names": dict(usecols="C:CH", skiprows=5, nrows=1),
+            "full": dict(usecols="C:CH", skiprows=7, nrows=67),
         },
         "post": {
             "years": range(1997, 2024),
@@ -205,7 +203,8 @@ def load_bea_io_data(data_folder):
             "fd": dict(usecols="CQ", skiprows=7, nrows=71),
             "va": dict(usecols="C:BU", skiprows=84, nrows=1),
             "exp": dict(usecols="CC", skiprows=7, nrows=71),
-            # no GFG scaling for post
+            "full_names": dict(usecols="C:CR", skiprows=5, nrows=1),
+            "full": dict(usecols="C:CR", skiprows=7, nrows=73),
         },
     }
 
@@ -224,7 +223,7 @@ def load_bea_io_data(data_folder):
         else:
             return df.fillna(0).to_numpy()
 
-    def compute_demand_shares(IO, FD):
+    def compute_demand_shares(IO, FD, names):
         total = IO.sum(axis=1) + FD
         C_p = IO / total[None, :]
         UDS = np.linalg.inv(np.eye(len(total)) - C_p) * np.outer(1 / total, FD)
@@ -232,99 +231,380 @@ def load_bea_io_data(data_folder):
         # avoid divide by zero invalid value warnings
         with np.errstate(divide="ignore", invalid="ignore"):
             DDS = IO / (total - FD)[:, None]
-        return DDS, UDS
 
-    def compute_cost_shares(IO, VA, GFGSCL=None, gfg_source_index=None):
+        df_d = pd.DataFrame(DDS, columns=names, index=names).stack().reset_index()
+        df_u = pd.DataFrame(UDS, columns=names, index=names).stack().reset_index()
+        df_d.columns = ["naics_source", "naics_dest", "DDS"]
+        df_u.columns = ["naics_source", "naics_dest", "UDS"]
+        out = pd.merge(df_d, df_u, on=["naics_source", "naics_dest"], how="outer")
+        out.fillna(0, inplace=True)
+
+        return out
+
+    def compute_cost_shares(IO, VA, names):
         total = IO.sum(axis=0) + VA
         II = IO.shape[0]
         C_p = IO / total[:, None]
         UCS = np.linalg.inv(np.eye(II) - C_p.T) * VA[None, :] / total[:, None]
         DCS = (IO / (total - VA)).T
+
+        dcs_df = pd.DataFrame(DCS, columns=names, index=names).stack().reset_index()
+        ucs_df = pd.DataFrame(UCS, columns=names, index=names).stack().reset_index()
+
+        dcs_df.columns = ["naics_dest", "naics_source", "DCS"]
+        ucs_df.columns = ["naics_dest", "naics_source", "UCS"]
+
+        cmap = dcs_df.merge(ucs_df, on=["naics_source", "naics_dest"], how="outer")
+        cmap.fillna(0, inplace=True)
+
+        return cmap
+
+    def compute_sale_shares(FULL, names, full_names):
         # if historical, apply GFG scaling to IOT where source is GFG
-        IOT = IO.T.copy()
-        if GFGSCL is not None:
-            IOT[gfg_source_index, :] *= GFGSCL
-        total_mat = np.outer(total, np.ones(II))
-        return DCS, UCS, IOT, total_mat
+        full_names = list(full_names)
+        full_names[-2] = "total_final"
+        full_names[-1] = "total_output"
+        df = pd.DataFrame(
+            FULL, columns=full_names, index=list(names) + ["Used", "Other"]
+        )
+
+        df_tot = df[["total_output"]].reset_index(names="naics_source")
+        df = df.drop(columns=["total_output"]).stack().reset_index()
+        df.columns = ["naics_source", "naics_dest", "shipments"]
+        df = df.merge(df_tot, on="naics_source", how="left")
+
+        # Drop total rows
+        df = df[
+            (~df.naics_dest.isin(["T001", "total_final", "nan"]))
+            & (~df.naics_dest.isna())
+        ].copy()
+
+        # Aggregate by naics
+        df = map_naics_codes(df, vars=["naics_source"])
+        df = df.groupby(["naics_source", "naics_dest"], as_index=False).sum()
+
+        df["sales_sh"] = df["shipments"] / df["total_output"]
+        return df
 
     demand_side_shares = []
     cost_side_shares = []
+    sales_shares = []
     for era, cfg in ERA_CONFIG.items():
         for year in tqdm(cfg["years"]):
-            # 1) read all blocks
-            names = read_block(era, year, **cfg["names"])
+            # read all blocks
+            names = read_block(era, year, **cfg["names"]).astype(str)
             IO = read_block(era, year, **cfg["io"])
             FD = read_block(era, year, **cfg["fd"])
             VA = read_block(era, year, **cfg["va"])
             EXP = read_block(era, year, **cfg["exp"])
+            FULL = read_block(era, year, **cfg["full"])
+            full_names = read_block(era, year, **cfg["full_names"]).astype(str)
 
-            # 2) if historical, compute GFG scaling
-            GFGSCL = None
-            if era == "hist":
-                gfg_df = pd.read_excel(
-                    xls_map["hist"],
-                    sheet_name=str(year),
-                    header=0,
-                    engine="openpyxl",
-                    na_values="...",
-                    **cfg["gfg"],
-                ).fillna(0)
-                mask = gfg_df["IOCode"] == "GFG"
-                GFGSCL = (
-                    gfg_df.loc[mask, "National defense: Consumption expenditures"].iat[
-                        0
-                    ]
-                    / gfg_df.loc[mask, "Total Commodity Output"].iat[0]
-                )
-
-            # 3) demand‐side shares & write
-            DDS, UDS = compute_demand_shares(IO, FD)
-            df_d = pd.DataFrame(DDS, columns=names, index=names).stack().reset_index()
-            df_u = pd.DataFrame(UDS, columns=names, index=names).stack().reset_index()
-            df_d.columns = ["naics_source", "naics_dest", "DDS"]
-            df_u.columns = ["naics_source", "naics_dest", "UDS"]
-            out = pd.merge(df_d, df_u, on=["naics_source", "naics_dest"]).assign(
-                year=year
-            )
+            # demand‐side shares & write
+            out = compute_demand_shares(IO, FD, names)
+            out["year"] = year
             demand_side_shares.append(out)
 
-            # 4) cost‐side shares & write
-            DCS, UCS, IOT, TOTAL = compute_cost_shares(
-                IO,
-                VA,
-                GFGSCL,
-                gfg_source_index=(
-                    list(names).index("GFG") if GFGSCL is not None else None
-                ),
-            )
-            # build DataFrames
-            dcs_df = pd.DataFrame(DCS, columns=names, index=names).stack().reset_index()
-            ucs_df = pd.DataFrame(UCS, columns=names, index=names).stack().reset_index()
-            iot_df = pd.DataFrame(IOT, columns=names, index=names).stack().reset_index()
-            tot_df = (
-                pd.DataFrame(TOTAL, columns=names, index=names).stack().reset_index()
-            )
-            exp_df = pd.DataFrame({"naics_source": names, "exp": EXP})
+            # cost‐side shares & write
+            out = compute_cost_shares(IO, VA, names)
+            out["year"] = year
+            cost_side_shares.append(out)
 
-            dcs_df.columns = ["naics_source", "naics_dest", "DCS"]
-            ucs_df.columns = ["naics_source", "naics_dest", "UCS"]
-            # note: IOT rows come as (dest, source, IOT), swap names
-            iot_df.columns = ["naics_dest", "naics_source", "IOT"]
-            tot_df.columns = ["naics_dest", "naics_source", "total"]
-
-            cmap = (
-                dcs_df.merge(ucs_df, on=["naics_source", "naics_dest"])
-                .merge(iot_df, on=["naics_source", "naics_dest"])
-                .merge(tot_df, on=["naics_source", "naics_dest"])
-                .merge(exp_df, on="naics_source")
-            )
-            cmap["year"] = year
-
-            cost_side_shares.append(cmap)
+            ss = compute_sale_shares(FULL, names, full_names)
+            ss["year"] = year
+            sales_shares.append(ss)
 
     demand_side = pd.concat(demand_side_shares, ignore_index=True)
     cost_side = pd.concat(cost_side_shares, ignore_index=True)
-    return demand_side, cost_side
+    sales_shares = pd.concat(sales_shares, ignore_index=True)
+    return demand_side, cost_side, sales_shares
+
+
+def process_bea_accounts(
+    file_path: str,
+    sheet_name: str,
+    skiprows: int,
+    usecols: str,
+    nrows: int,
+    IOcodes: pd.DataFrame,
+    value_name: str = "qty_index",
+) -> pd.DataFrame:
+    df = pd.read_excel(
+        file_path,
+        sheet_name=sheet_name,
+        skiprows=skiprows,
+        header=0,
+        usecols=usecols,
+        nrows=nrows,
+        engine="openpyxl",
+    )
+    # drop any unwanted “Line” or “Unnamed: 2” cols if present
+    df = df.drop(
+        columns=[c for c in ("Line", "Unnamed: 2") if c in df], errors="ignore"
+    )
+    df = df.rename(columns={"Unnamed: 1": "Description"})
+    df = (
+        df.assign(Description=lambda d: d.Description.str.strip())
+        .pipe(clean_GDP_by_ind)
+        .merge(IOcodes, on="Description", how="inner")
+        .drop(columns="Description")
+        .assign(naics_code=lambda d: d.IO_Code)
+        .pipe(lambda d: map_naics_codes(d, vars=["naics_code"]))
+        .replace("...", 0)
+        .melt(id_vars=["naics_code", "IO_Code"], var_name="year", value_name=value_name)
+    )
+
+    df["year"] = pd.to_numeric(df["year"], errors="coerce")
+    df = df[df["year"].notnull()].copy()
+
+    df[value_name] = pd.to_numeric(df[value_name], errors="coerce")
+    df = df[df[value_name].notnull()].copy()
+
+    # Divide by 1997 level
+    val_1997 = (
+        df[df["year"] == 1997]
+        .rename(columns={value_name: f"{value_name}_1997"})
+        .drop(columns=["year"])
+        .copy()
+    )
+    df = df.merge(val_1997, on=["naics_code", "IO_Code"], how="left")
+    df[value_name] = 100 * df[value_name] / df[f"{value_name}_1997"]
+    df.drop(columns=[f"{value_name}_1997"], inplace=True)
+
+    return df
+
+
+def load_io_codes(file_path: str, nrows: int) -> pd.DataFrame:
+    return pd.read_excel(
+        file_path,
+        sheet_name="Sheet1",
+        header=5,
+        usecols="A:B",
+        nrows=nrows,
+        engine="openpyxl",
+    ).assign(Description=lambda df: df.Description.str.strip())
+
+
+def load_bea_industry_accounts(data_folder):
+    """
+    Load data from the BEA on industry accounts
+    """
+
+    # f"{data_folder}/raw/bea/{filename}"
+
+    IOcodes = load_io_codes(
+        os.path.join(data_folder, "raw", "bea", "IO_codes.xlsx"), nrows=71
+    )
+    IOcodes_hist = load_io_codes(
+        os.path.join(data_folder, "raw", "bea", "IO_codes_aggregated.xlsx"), nrows=65
+    )
+
+    quantities = process_bea_accounts(
+        os.path.join(data_folder, "raw", "bea", "II_qty_97_24.xlsx"),
+        "Sheet1",
+        skiprows=7,
+        usecols="A:AE",
+        nrows=99,
+        IOcodes=IOcodes,
+        value_name="qty_index",
+    )
+    prices = process_bea_accounts(
+        os.path.join(data_folder, "raw", "bea", "II_price_97_23.xlsx"),
+        "Sheet1",
+        skiprows=7,
+        usecols="A:AD",
+        nrows=99,
+        IOcodes=IOcodes,
+        value_name="price_index",
+    )
+    quantities_hist = process_bea_accounts(
+        os.path.join(data_folder, "raw", "bea", "GDPbyInd_II_1947-1997.xlsx"),
+        "ChainQtyIndexes",
+        skiprows=5,
+        usecols="A:BA",
+        nrows=102,
+        IOcodes=IOcodes_hist,
+        value_name="qty_index",
+    )
+    prices_hist = process_bea_accounts(
+        os.path.join(data_folder, "raw", "bea", "GDPbyInd_II_1947-1997.xlsx"),
+        "ChainPriceIndexes",
+        skiprows=5,
+        usecols="A:BA",
+        nrows=102,
+        IOcodes=IOcodes_hist,
+        value_name="price_index",
+    )
+
+    df = prices.merge(quantities, on=["naics_code", "IO_Code", "year"], how="left")
+    df_hist = prices_hist.merge(
+        quantities_hist, on=["naics_code", "IO_Code", "year"], how="left"
+    )
+
+    return df, df_hist
+
+
+def map_naics_codes(df, vars=[]):
+    mappings = [
+        ("11", ["111CA", "113FF"]),
+        ("336", ["3361MV", "3364OT"]),
+        ("311,2", ["311FT"]),
+        ("313,4", ["313TT"]),
+        ("315,6", ["315AL"]),
+        ("44", ["441", "445", "452", "4A0"]),
+        ("48", ["481", "482", "483", "484", "485", "486", "487OS", "493"]),
+        ("52", ["521CI", "523", "524", "525"]),
+        ("53", ["HS", "ORE", "532RL"]),
+        ("54", ["5411", "5415", "5412OP"]),
+        ("71", ["711AS", "713"]),
+    ]
+    for var in vars:
+        for new_code, pats in mappings:
+            pattern = "|".join(pats)
+            mask = df[var].str.contains(pattern, na=False)
+            df.loc[mask, var] = new_code
+
+        # Split naics
+        naics_map = {
+            "311,2": ["311", "312"],
+            "313,4": ["313", "314"],
+            "315,6": ["315", "316"],
+        }
+
+        df[var] = df[var].map(lambda x: naics_map[x] if x in naics_map else [x])
+
+        df = df.explode(var).reset_index(drop=True)
+
+    return df
+
+
+def construct_shea_indicators(data_folder, shea_threshold=3):
+    """
+    Load data from the SHEA on intermediate inputs
+    """
+    demand_shares, cost_shares, sales_shares = construct_bea_shares(data_folder)
+
+    # Merge both source-dest and dest-source
+    shea_full = cost_shares.merge(
+        demand_shares, on=["naics_source", "naics_dest", "year"], how="left"
+    )
+    rev = shea_full[["naics_source", "naics_dest", "year", "DCS", "UCS"]].rename(
+        columns={
+            "naics_source": "naics_dest",
+            "naics_dest": "naics_source",
+            "DCS": "DCS_ji",
+            "UCS": "UCS_ji",
+        }
+    )
+    shea_full = shea_full.merge(
+        rev, on=["naics_source", "naics_dest", "year"], how="left"
+    )
+
+    shea_full["naics_source"] = shea_full["naics_source"].astype(str)
+    shea_full["naics_dest"] = shea_full["naics_dest"].astype(str)
+    shea_full = shea_full[shea_full["naics_source"].str.startswith("3")]
+
+    # Compute stats
+    valid = (shea_full[["DDS", "UDS", "DCS", "UCS", "DCS_ji", "UCS_ji"]] >= 0).all(
+        axis=1
+    )
+
+    stat1 = shea_full[["DDS", "UDS"]].min(axis=1) / shea_full[["DCS", "UCS"]].max(
+        axis=1
+    )
+    stat2 = shea_full[["DDS", "UDS"]].min(axis=1) / shea_full[
+        ["DCS", "UCS", "DCS_ji", "UCS_ji"]
+    ].max(axis=1)
+
+    shea_full["stat1"] = np.where((valid) & (np.abs(stat1) != np.inf), stat1, 0)
+    shea_full["stat2"] = np.where((valid) & (np.abs(stat2) != np.inf), stat2, 0)
+
+    shea_full["era"] = (shea_full.year >= 1997).astype(int)
+
+    # Compute min by industry
+    for i in [1, 2]:
+        shea_full[f"Lshea{i}"] = (shea_full[f"stat{i}"] > shea_threshold).astype(int)
+        # NOTE: Difference from Boem -- they groupby era as well, but this seems arbitrary
+        # shea_full[f"Lshea{i}_min"] = shea_full.groupby(["naics_source", "naics_dest"])[
+        #     f"Lshea{i}"
+        # ].transform("min")
+        shea_full[f"Lshea{i}_min"] = shea_full.groupby(
+            ["naics_source", "naics_dest", "era"]
+        )[f"Lshea{i}"].transform("min")
+
+    shea_full["year"] = shea_full["year"] + 1
+
+    # Collapse by industry
+    shea_full = map_naics_codes(shea_full, vars=["naics_source"])
+
+    shea_full = shea_full.groupby(
+        ["naics_source", "naics_dest", "year"], as_index=False
+    ).agg(
+        Lshea1=("Lshea1", "min"),
+        Lshea2=("Lshea2", "min"),
+        Lshea1_min=("Lshea1_min", "min"),
+        Lshea2_min=("Lshea2_min", "min"),
+    )
+
+    # Split naics
+    naics_map = {
+        "311,2": ["311", "312"],
+        "313,4": ["313", "314"],
+        "315,6": ["315", "316"],
+    }
+    shea_full = (
+        shea_full.assign(
+            naics_source=lambda d: d["naics_source"].apply(
+                lambda x: naics_map[x] if x in naics_map else [x]
+            )
+        )
+        .explode("naics_source")
+        .reset_index(drop=True)
+    )
+
+    return shea_full, clean_shares(sales_shares)
+
+
+def clean_shares(df):
+    df = df[df["naics_source"].str.startswith("3") | (df["naics_source"] == "GFG")]
+    df = df.drop(columns=["total_output", "shipments"])
+
+    # Create destination variable
+    df["dest"] = df["naics_dest"]
+    df.loc[df["naics_dest"] == "F010", "dest"] = "pce"
+    df.loc[df["naics_dest"].isin(["F02S", "F02R", "F02T"]), "dest"] = "struct"
+    df.loc[df["naics_dest"] == "F02E", "dest"] = "equip"
+    df.loc[df["naics_dest"] == "F02N", "dest"] = "ipp"
+    df.loc[df["naics_dest"] == "F040", "dest"] = "exports"
+    df.loc[df["naics_dest"].str.startswith("F06", na=False), "dest"] = "defense"
+    df.loc[df["naics_dest"] == "GFGD", "dest"] = "defense"
+
+    # Step: Generate adjustment factor for GFG
+    adj = (
+        df.query("naics_source == 'GFG' and naics_dest == 'F06C'")
+        .loc[:, ["naics_source", "year", "sales_sh"]]
+        .rename(columns={"sales_sh": "adj_factor_GFG", "naics_source": "naics_dest"})
+    )
+
+    # Merge adjustment factor
+    df = df[df["naics_source"] != "GFG"]
+    df = df.merge(adj, on=["naics_dest", "year"], how="left")
+
+    # Adjust sales share for GFG
+    mask = df["naics_dest"] == "GFG"
+    df.loc[mask, "sales_sh"] *= df.loc[mask, "adj_factor_GFG"]
+    df["dest"] = np.where(mask, "defense", df["dest"])
+    df = df.drop(columns=["adj_factor_GFG"])
+
+    # Drop if missing
+    df = df[~df.dest.str.startswith("F", na=False)].copy()
+
+    # Collapse (sum) by group
+    agg = df.groupby(["naics_source", "dest", "year"], as_index=False)["sales_sh"].sum()
+    agg = agg.rename(columns={"sales_sh": "Lsales_sh"})
+    agg["year"] += 1
+
+    return agg
 
 
 class NaicsDemandShocks:
@@ -344,11 +624,49 @@ class NaicsDemandShocks:
         """
         # TODO
 
-    def _construct_shea_shocks(self):
+    def _construct_shea_shocks(self, shea_threshold=3):
         """
         Constructs shocks for naics level using data on intermediate inputs
         """
-        # TODO
+        # Load data
+        df_curr, df_hist = load_bea_industry_accounts(self.data_folder)
+        df = pd.concat([df_curr, df_hist], ignore_index=True)
+
+        # Clean data
+        df = df.rename(columns={"IO_Code": "dest"})
+        df = df[~df["dest"].str.startswith("G")].copy()
+        df["ind_gr"] = df["dest"].astype("category").cat.codes
+        df = df.sort_values(["ind_gr", "year"])
+        df["Dln_M"] = df.groupby("ind_gr")["qty_index"].pct_change()
+        df = df.drop(columns=["price_index", "qty_index"]).copy()
+
+        # Load SHEA data
+        shea_indicators, sales_shares = construct_shea_indicators(
+            self.data_folder, shea_threshold
+        )
+
+        df = df.merge(sales_shares, on=["dest", "year"], how="inner")
+        df = df.merge(
+            shea_indicators,
+            left_on=["naics_source", "dest", "year"],
+            right_on=["naics_source", "naics_dest", "year"],
+            how="inner",
+        )
+
+        for indicator_col in ["Lshea1", "Lshea2", "Lshea1_min", "Lshea2_min"]:
+            new_col = f"Dln_M_{indicator_col.replace('Lshea', 'shea_inst')}"
+            df[new_col] = df["Dln_M"] * df[indicator_col] * df["Lsales_sh"]
+
+        df = df.groupby(["naics_source", "year"], as_index=False).agg(
+            Dln_M_shea_inst1=("Dln_M_shea_inst1", "sum"),
+            Dln_M_shea_inst2=("Dln_M_shea_inst2", "sum"),
+            Dln_M_shea_inst1_min=("Dln_M_shea_inst1_min", "sum"),
+            Dln_M_shea_inst2_min=("Dln_M_shea_inst2_min", "sum"),
+        )
+
+        df = df.rename(columns={"naics_source": "naics3"})
+
+        return df
 
     def _compile_naics_data(self):
         """
