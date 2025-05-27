@@ -672,7 +672,13 @@ class NaicsDemandShocks:
         """
         Compile naics data on prices, quantities, investment
         """
-        # TODO
+        file = os.path.join(
+            self.data_folder,
+            "raw",
+            "nber-manufacturing-data",
+            "nberces5818v1_n1997.csv",
+        )
+        df = pd.read_csv(file)
 
     # Public methods
     def initialize_data(self):
