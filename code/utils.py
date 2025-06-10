@@ -516,9 +516,7 @@ def iv_panel_reg(
 
     # De-mean before, since IV module cannot accept fixed effects
     for col in [dep_var] + exog + endog + instruments:
-        data[col] = demean_by_fixed_effects(
-            data, col, time_fe=time_fe, group_fe=group_fe
-        )
+        data[col] = demean(data, col, time_fe=time_fe, group_fe=group_fe)
 
     # Run IV
     model = IV2SLS(
@@ -685,9 +683,14 @@ def regfe(
 ###### Functions for graphing
 
 
-def demean_by_fixed_effects(df, x_var, time_fe=True, group_fe=True, weight_col=None):
+def demean(df, x_var, controls=[], time_fe=True, group_fe=True, weight_col=None):
     result = panel_reg(
-        df, x_var, time_fe=time_fe, group_fe=group_fe, weight_col=weight_col
+        df,
+        x_var,
+        ind_vars=controls,
+        time_fe=time_fe,
+        group_fe=group_fe,
+        weight_col=weight_col,
     )
     return result.resids + df[x_var].mean()
 
@@ -699,6 +702,7 @@ def binscatter_plot(
     num_bins=20,
     time_fe=False,
     group_fe=False,
+    controls=[],
     weights=None,
     connect_dots=False,
     filename=None,
@@ -722,19 +726,29 @@ def binscatter_plot(
         connect_dots (bool): Whether to connect the binned points with a line.
         filename (str, optional): If provided, saves the plot to this filename.
     """
-    cols = [x_var, y_var]
+    cols = [x_var, y_var] + controls
     if weights is not None:
         cols.append(weights)
     df = data[cols].dropna().copy()
 
     # If fixed effects are to be removed, work with a DataFrame that includes them.
-    if time_fe or group_fe:
+    if time_fe or group_fe or controls:
         # Replace x_var and y_var with their demeaned versions.
-        df[x_var] = demean_by_fixed_effects(
-            df, x_var, weight_col=weights, time_fe=time_fe, group_fe=group_fe
+        df[x_var] = demean(
+            df,
+            x_var,
+            weight_col=weights,
+            time_fe=time_fe,
+            group_fe=group_fe,
+            controls=controls,
         )
-        df[y_var] = demean_by_fixed_effects(
-            df, y_var, weight_col=weights, time_fe=time_fe, group_fe=group_fe
+        df[y_var] = demean(
+            df,
+            y_var,
+            weight_col=weights,
+            time_fe=time_fe,
+            group_fe=group_fe,
+            controls=controls,
         )
 
     # Create quantile-based bins that have an equal number of data points.

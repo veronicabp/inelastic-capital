@@ -1,3 +1,6 @@
+from utils import *
+
+
 def load_frb_data(data_folder):
     """
     Load data from the FRB on capacity and utilization rates
@@ -579,7 +582,7 @@ def clean_shares(df):
     df.loc[df["naics_dest"].str.startswith("F06", na=False), "dest"] = "defense"
     df.loc[df["naics_dest"] == "GFGD", "dest"] = "defense"
 
-    # Step: Generate adjustment factor for GFG
+    # Generate adjustment factor for GFG
     adj = (
         df.query("naics_source == 'GFG' and naics_dest == 'F06C'")
         .loc[:, ["naics_source", "year", "sales_sh"]]
@@ -672,13 +675,86 @@ class NaicsDemandShocks:
         """
         Compile naics data on prices, quantities, investment
         """
-        file = os.path.join(
+
+        # NBER CES Manufacturing data
+        ces_file = os.path.join(
             self.data_folder,
             "raw",
             "nber-manufacturing-data",
             "nberces5818v1_n1997.csv",
         )
-        df = pd.read_csv(file)
+        ces = pd.read_csv(ces_file)
+
+        ces = ces.sort_values(["naics", "year"])
+        ces["vprod"] = (
+            ces["vship"] + ces["invent"] - ces.groupby("naics")["invent"].shift(1)
+        )
+        ces["L_vprod"] = ces.groupby("naics")["vprod"].shift(1)
+
+        ces["Dln_piship"] = np.log(ces["piship"]) - np.log(
+            ces.groupby("naics")["piship"].shift(1)
+        )
+
+        # Collapse by naics3 and year
+        ces["naics3"] = ces["naics"].astype(str).str[:3]
+
+        # Take industry-size weighted average of piship
+        ces["s_vprod"] = ces["vprod"] / ces.groupby(["naics3", "year"])[
+            "vprod"
+        ].transform("sum")
+        ces["s_lvprod"] = ces["L_vprod"] / ces.groupby(["naics3", "year"])[
+            "L_vprod"
+        ].transform("sum")
+        ces["Dln_piship"] = ces["Dln_piship"] * (ces["s_vprod"] + ces["s_lvprod"]) / 2
+
+        ces["VC"] = ces[["prodw", "matcost", "energy"]].sum(axis=1)
+
+        ces = ces.groupby(["naics3", "year"], as_index=False).agg(
+            Dln_piship=("Dln_piship", "sum"),
+            vprod=("vprod", "sum"),
+            vship=("vship", "sum"),
+            invent=("invent", "sum"),
+            VC=("VC", "sum"),
+        )
+
+        ces.loc[ces["vprod"] == 0, "vprod"] = np.nan
+
+        # NOTE: Boehm use pct difference instead of log -- does this matter?
+        ces["Dln_vprod"] = np.log(ces["vprod"]) - np.log(
+            ces.groupby("naics3")["vprod"].shift(1)
+        )
+
+        # FRB Utilization data
+        # TODO: Data cleaning. Currently taking Boehm cleaned version
+        frb_file = os.path.join(
+            self.data_folder,
+            "raw",
+            "original",
+            "boem_pandalai-nayar_2022",
+            "empirics",
+            "main analysis",
+            "temp_files",
+            "industry_utilization_data_final.dta",
+        )
+        frb = pd.read_stata(frb_file)
+        frb = frb[(frb["naics"].str.startswith("3"))].copy()
+        frb = frb[frb["naics"].str.len() == 3].copy()
+        frb = frb.rename(columns={"naics": "naics3"})
+        frb = frb.sort_values(["naics3", "year"])
+
+        df = ces.merge(
+            frb,
+            on=["naics3", "year"],
+            how="inner",
+        )
+
+        for col in ["ip", "util", "cap", "VC"]:
+            df[f"Dln_{col}"] = np.log(df[col]) - np.log(
+                df.groupby("naics3")[col].shift(1)
+            )
+
+        df["Dln_Pip"] = df["Dln_vprod"] - df["Dln_ip"]
+        df["Dln_UVCip"] = df["Dln_VC"] - df["Dln_ip"]
 
     # Public methods
     def initialize_data(self):

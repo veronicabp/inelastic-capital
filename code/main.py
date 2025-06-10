@@ -2,6 +2,7 @@
 import utils
 from utils import *
 import usfirms.demand_shocks as ds
+import usfirms.naics_demand_shocks as nds
 import usfirms.regressions as rr
 import usfirms.cross_country_results as cc
 import usfirms.firm_duration as fd
@@ -13,6 +14,7 @@ load_dotenv()
 
 # %%
 reload(ds)
+reload(nds)
 reload(rr)
 reload(cc)
 reload(fd)
