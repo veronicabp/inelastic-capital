@@ -30,6 +30,19 @@ print(sys.version)
 print(sys.executable)
 print(sys.path)
 
+import utils
+from utils import *
+reload(utils)
+
+# now add the sub‐folder where naics_demand_shocks.py actually lives
+usfirms_folder = os.path.join(os.getcwd(), "usfirms")
+if usfirms_folder not in sys.path:
+    sys.path.append(usfirms_folder)
+# import & reload the module
+import naics_demand_shocks
+from naics_demand_shocks import *
+reload(naics_demand_shocks)
+
 # %% Manually fix the GDP data csv
 # file = os.path.join(
 #     data_folder,
@@ -57,16 +70,14 @@ print(sys.path)
 # Also manually fixed BACI country codes in Excel
 
 # %% Set "data" folder
-import utils
-from utils import *
-
-reload(utils)
 
 folder = "C:/Users/illge/Princeton Dropbox/Sam Barnett/inelastic_capital"
 data_folder = os.path.join("..", "data")
 
 
+
 # %% Get GDP, Exchange rate, and HS-NAICS crosswalk data
+# OLD CODE BUILDING SANDBOX  v ------------------------------------ v
 gdp_data = load_gdp_data(data_folder)
 
 exchange_rate_data = load_exchange_rate_data(data_folder)
@@ -1190,10 +1201,744 @@ exports_calc = pd.merge(exports, shea_full, on=["naics_source", "year"], how="in
 # drop naics_year
 exports_calc = exports_calc.drop(columns=["naics_year"])
 
-# %% Main sample
+# OLD CONSTRUCTION ABOVE  ^ -------------------------------- ^ 
+
+
+
+# %% Main sample || remember these two facts below! 
 
 # Everything is winsorized at 1% and 99%
 # Everything *that enters interaction terms* is demeaned.
 
+
+# %% "Test drive" of functions 
+frb_data = load_frb_data(data_folder)
+
+#figure 4 dotted lightblue line replication in Boehm 2022 
+#make a figure with average utilization_mn by year vs year 
+#first make df "frb_data_avg" with average utilization_mn by year
+frb_data_avg = (
+    frb_data.groupby("year", as_index=False)["utilization_dmn"].mean()
+)
+
+out_dir = os.path.join(data_folder, "temp_files")
+os.makedirs(out_dir, exist_ok=True)
+plt.figure(figsize=(10, 6))
+plt.plot(
+    frb_data_avg["year"],
+    frb_data_avg["utilization_dmn"],
+    label="Average Utilization (demeaned w/in industry)",
+    color="lightblue",
+    linestyle="--",
+)
+plt.title("Average Utilization by Year")
+plt.xlabel("Year")
+plt.ylabel("Average Utilization (mn)")
+plt.legend()
+plt.xticks(frb_data["year"], rotation=45)
+plt.tight_layout()
+plt.savefig(
+    os.path.join(out_dir, "avg_utilization_mn_by_year.png"), dpi=300
+)  # save figure
+
+
+gdp_data = load_gdp_data(data_folder)
+exchange_rate_data = load_exchange_rate_data_forUN(data_folder)
+schott_exports = load_schott_exports(data_folder)
+#ingredients: industry export shares, country dln real gdp, country dln exchange rate (er = 1/er, imf-based, we have same data)
+#new: load_un_gdp_data 
+
+def load_un_gdp_data(data_folder):
+    file = os.path.join(
+        data_folder,
+        "raw",
+        "unstats",
+        "UNdata_GDP_constant2015LCU.csv"
+    )
+    df = pd.read_csv(file)
+    #keep if item == "GDP constant 2015 US$"
+    df = df[df["Item"] == "Gross Domestic Product (GDP)"]
+    #rename ("Country or Area" "Year" "Value") (Country Code, year, gdp)
+    df.rename(
+        columns={
+            "Country or Area": "country",
+            "Year": "year",
+            "Value": "gdp"
+        },
+        inplace=True
+    )
+    df["year"] = pd.to_numeric(df.year, errors="coerce")
+    df.dropna(subset=["year", "gdp"], inplace=True)
+    #czech republic, united kingdom, turkey: rename to merge with PWT (only pre-2000 OECD join matter), but keep orig names
+    df["tempcountry"] = df["country"].replace({
+        "Czechia": "Czech Republic",
+        "United Kingdom of Great Britain and Northern Ireland": "United Kingdom",
+        "Türkiye":  "Turkey"
+    })
+
+    country_codes = pd.read_stata(
+        os.path.join(data_folder, "raw", "pwt", "pwt100.dta")
+    )
+    #keep only countrycode and country in country_codes
+    country_codes = country_codes[["countrycode", "country"]]
+    country_codes.rename(columns={"country": "tempcountry"}, inplace=True)
+    country_codes.drop_duplicates(inplace=True)
+
+    df = df.merge(
+        country_codes, on="tempcountry", how="inner"
+    )
+
+    return df[["countrycode", "country", "year", "gdp"]]
+
+gdp_data = load_un_gdp_data(data_folder)
+
+
+# %% Process ingredients for WID and ER instruments, including GDP in millions 
+# divide GDP by 1e6 to get GDP in millions
+gdp_data["gdp"] = gdp_data["gdp"] / 1e6  # GDP in millions
+#rename iso3_digit_alpha to country_abb 
+gdp_data.rename(columns={"countrycode": "country_abb"}, inplace=True)
+
+#already replaced exchange rate with 1/exchange rate
+
+#%% 
+#Get "UN data"
+exports_gdp_er = pd.merge(
+    exchange_rate_data, gdp_data, on=["country", "year"], how="left"
+)
+#rename countries in UN data 
+exports_gdp_er["country"] = exports_gdp_er["country"].replace({ 
+        "Czechia": "Czech Republic",
+        "United Kingdom of Great Britain and Northern Ireland": "United Kingdom",
+        "Venezuela (Bolivarian Republic of)": "Venezuela",
+        "China (mainland)": "China", 
+        "Türkiye": "Turkey"
+    })
+
+#load iso codes, merge with UN data 
+# isocodes = load_iso_codes(data_folder)
+# #rename wbcode country_abb
+# isocodes.rename(columns={"wbcode": "country_abb"}, inplace=True)
+# #merge gdp data with iso codes on country_abb, keeping master and matched
+# exports_gdp_er = pd.merge(
+#     exports_gdp_er, isocodes, on="country", how="left"
+# )
+
+#merge in exports data
+exports_gdp_er = exports_gdp_er[exports_gdp_er["country_abb"].notna()] 
+schott_exports = schott_exports[schott_exports["country_abb"].notna()]
+# exports_gdp_er = pd.merge(
+#     exports_gdp_er, schott_exports, on=["country_abb", "year"], how="inner"
+# )
+exports_gdp_er = pd.merge(
+    exports_gdp_er, schott_exports, on=["country_abb", "year"], how="left"
+)
+
+#drop if year < 1972 --- this corrects minor error in Boehm 2022 who do <=, CAN UNCHECK TO MATCH THEIRS?
+exports_gdp_er["year"] = exports_gdp_er["year"].astype(int)
+exports_gdp_er = exports_gdp_er[exports_gdp_er["year"] > 1971]
+#drop if missing naics
+exports_gdp_er = exports_gdp_er[exports_gdp_er["naics"].notna()]
+#keep if naics starts with 3
+exports_gdp_er = exports_gdp_er[exports_gdp_er["naics"].str.startswith("3")]
+
+#gen Dln_rgdp 		= (rgdp_ncu 		- L1.rgdp_ncu)/L1.rgdp_ncu
+#gen Dln_er 			= (er 				- L1.er)/L1.er
+#generate lag of GDP, exchange rate, and export share
+exports_gdp_er["Lrgdp_ncu"] = exports_gdp_er.groupby(
+    ["naics", "country_abb"]
+)["gdp"].shift(1)
+exports_gdp_er["Ler"] = exports_gdp_er.groupby(
+    ["naics", "country_abb"]
+)["exchange_rate"].shift(1)
+exports_gdp_er["Lexp_share"] = exports_gdp_er.groupby(
+    ["naics", "country_abb"]
+)["exp_share"].shift(1)
+#generate Dln_rgdp and Dln_er
+exports_gdp_er["Dln_rgdp"] = (
+    exports_gdp_er["gdp"] - exports_gdp_er["Lrgdp_ncu"]
+) / exports_gdp_er["Lrgdp_ncu"]
+exports_gdp_er["Dln_er"] = (
+    exports_gdp_er["exchange_rate"] - exports_gdp_er["Ler"]
+) / exports_gdp_er["Ler"]
+
+#generate exp_share times Dln_rgdp and Dln_er as kern_WID and kern_ER
+exports_gdp_er["kern_WID"] = (
+    exports_gdp_er["Lexp_share"] * exports_gdp_er["Dln_rgdp"]
+)
+exports_gdp_er["kern_ER"] = (
+    exports_gdp_er["Lexp_share"] * exports_gdp_er["Dln_er"]
+)
+
+#replace kern_WID = 0 if missing kern_WID, replace kern_ER = 0 if missing kern_ER
+exports_gdp_er["kern_WID"].fillna(0, inplace=True)
+exports_gdp_er["kern_ER"].fillna(0, inplace=True)
+
+#TESTINg
+# exports_gdp_er = exports_gdp_er.sort_values(by=["year", "country"])
+# exports_gdp_er.drop_duplicates(subset=["country"], inplace=True) 
+
+# korea turkey UK missing in new GDP data?
+# . levelsof country
+# `"Australia"' `"Austria"' `"Belgium"' `"Canada"' `"Czech Republic"' `"Denmark"' `"Finland"' `"France"' `"Germany"' `"Greece"' `"Hungary"' `"I
+# > celand"' `"Ireland"' `"Italy"' `"Japan"' `"Luxembourg"' `"Mexico"' `"Netherlands"' `"New Zealand"' `"Norway"' `"Poland"' `"Portugal"' `"Rep
+# > ublic of Korea"' `"Spain"' `"Sweden"' `"Switzerland"' `"Turkey"' `"United Kingdom"'
+
+
+#load data on when OECD joined, taken from Boehm (2022). (pre-post 2000)
+oecd_joined = pd.read_excel(
+    os.path.join(data_folder, "raw", "original", "boem_pandalai-nayar_2022", "empirics", "main analysis", "raw_data", "oecd_join.xls"), sheet_name="joined_OECD"
+)
+oecd_joined["country"] = oecd_joined["country"].replace({
+    "China, P.R.: Mainland": "China",
+    "Armenia, Republic of": "Armenia",
+    "Bahamas, The": "Bahamas",
+    "Bahrain, Kingdom of": "Bahrain",
+    "Bolivia": "Bolivia (Plurinational State of)",
+    "Korea, Republic of": "Republic of Korea",
+    "Slovak Republic": "Slovakia"
+})
+#merge oecd_joined with exports_gdp_er on country_abb and country
+exports_gdp_er = pd.merge(
+    exports_gdp_er, oecd_joined, on="country", how="left"
+)
+#keep if oecd_pre2000 == 1
+exports_gdp_er = exports_gdp_er[exports_gdp_er["oecd_pre2000"] == 1]  #OECD pre-2000 sample, what Boehm (2022) uses
+
+#collapse by naics_source and year, summing kern_WID and kern_ER
+exports_gdp_er = exports_gdp_er.groupby(
+    ["naics", "year"], as_index=False
+).agg({"kern_WID": "sum", "kern_ER": "sum", "Lexp_share": "sum"})
+
+#rename kern_WID and kern_ER Dln_frgn_rgdp and Dln_er
+exports_gdp_er.rename(
+    columns={"kern_WID": "Dln_frgn_rgdp", "kern_ER": "Dln_er"}, inplace=True
+) # these are the WID and ER instruments, respectively. Goes to 2022 only, I think load_schott_exports is the issue
+# we are using current USD, they are using constant NCU--I think their approach makes more sense...
+#THE ABOVE IS AN IMPORTANT DIFFERENCE. I changed it 
+
+
+
+# %% 
+# use NBER CES data, FRED for price index: change in value - change in prodn
+nber_ces = pd.read_csv(
+    os.path.join(data_folder, "raw", "nber-manufacturing-data", "nberces5818v1_n2012.csv")
+)
+#keep naics3 as first 3 digits of naics, where naics is numeric. within-naics lags still used
+nber_ces["naics3"] = nber_ces["naics"].astype(str).str[:3]
+nber_ces["Linvent"] = nber_ces.groupby(["naics"])["invent"].shift(1) 
+#vprod = vship + invent - Linvent
+    #nber_ces["vship"] = nber_ces["vship"].fillna(0)  # fill NaN with 0 -- I think not needed?
+    #nber_ces["invent"] = nber_ces["invent"].fillna(0)  # fill NaN with 0 -- I think not needed?
+nber_ces["vprod"] = nber_ces["vship"] + nber_ces["invent"] - nber_ces["Linvent"]
+#get lag vprod
+nber_ces["Lvprod"] = nber_ces.groupby(["naics"])["vprod"].shift(1)
+
+nber_ces["vprod_tot"] = nber_ces.groupby(["naics3", "year"])["vprod"].transform("sum") #total w/in 3-dig naics
+nber_ces["lvprod_tot"] = nber_ces.groupby(["naics3", "year"])["Lvprod"].transform("sum") #total w/in 3-dig naics
+nber_ces["s_vprod"] = nber_ces["vprod"] / nber_ces["vprod_tot"]
+nber_ces["ls_vprod"] = nber_ces["Lvprod"] / nber_ces["lvprod_tot"]
+
+# gen Dln_piship = ln(piship) - ln(L.piship). ROUNDING DIFFS IN PISHIP (NOW 2012, BOEHM (2022) IS 1997) -> SMALL DIFFS
+nber_ces["Dln_piship"] = np.log(nber_ces["piship"]) - np.log(nber_ces.groupby(["naics"])["piship"].shift(1))
+
+nber_ces["Dln_piship_n3"] = (
+    0.5 * (nber_ces["s_vprod"] + nber_ces["ls_vprod"]) * nber_ces["Dln_piship"]
+)
+
+#collapse (sum) vprod, Lvprod by naics3 and year
+nber_ces = nber_ces.groupby(["naics3", "year"], as_index=False).agg(
+    {"vprod": "sum", "Lvprod": "sum", "Dln_piship_n3": "sum", "prodw": "sum", "matcost": "sum", "energy": "sum"}
+)
+#rename naics3 to naics
+nber_ces.rename(columns={"naics3": "naics"}, inplace=True)
+
+#Dln_vprod = (vprod - Lvprod)/Lvprod
+nber_ces["Dln_vprod"] = (nber_ces["vprod"] - nber_ces["Lvprod"]) / nber_ces["Lvprod"]
+
+#VC = prodw+matcost+energy
+nber_ces["VC"] = (nber_ces["prodw"] + nber_ces["matcost"] + nber_ces["energy"])
+nber_ces["Dln_VC"] = (
+    np.log(nber_ces["VC"]) - np.log(nber_ces.groupby(["naics"])["VC"].shift(1))
+)
+
+# Stata to replicate for Unit Variable Costs control. Make sure 40 is enough
+
+# # piship_n3 = 1 if year == 1997
+# nber_ces["piship_n3"] = np.where(
+#     nber_ces["year"] == 1997, 1, np.nan
+# ) 
+
+# for i in range(1, 41):
+#     nber_ces["F.piship_n3"] = nber_ces.groupby(["naics"])["piship_n3"].shift(-1)
+#     nber_ces["piship_n3"] = np.where(
+#         nber_ces["F.piship_n3"].notna(),
+#         nber_ces["F.piship_n3"] / np.exp(nber_ces["Dln_piship_n3"]),
+#         nber_ces["piship_n3"],
+#     )
+
+# for i in range(1,22):
+#     nber_ces["L.piship_n3"] = nber_ces.groupby(["naics"])["piship_n3"].shift(1)
+#     nber_ces["piship_n3"] = np.where(  
+#         (nber_ces["piship_n3"].isna()) & (nber_ces["L.piship_n3"].notna()),
+#         nber_ces["L.piship_n3"] * np.exp(nber_ces["Dln_piship_n3"]),
+#         nber_ces["piship_n3"],
+#     )    
+
+# #rename piship_n3 piship
+# nber_ces.rename(columns={"piship_n3": "piship"}, inplace=True)
+# #r_vprod = vprod/piship (this is real val production)
+# nber_ces["r_vprod"] = nber_ces["vprod"] / nber_ces["piship"]
+# #UVC = (prodw+matcost+energy)/r_vprod 
+# nber_ces["UVC"] = (
+#     nber_ces["prodw"] + nber_ces["matcost"] + nber_ces["energy"]
+# ) / nber_ces["r_vprod"]
+# #Dln_UVC = (UVC-L.UVC)/L.UVC
+# nber_ces["lUVC"] = nber_ces.groupby(["naics"])["UVC"].shift(1)
+# nber_ces["Dln_UVC"] = (nber_ces["UVC"] - nber_ces["lUVC"]
+# ) / nber_ces["lUVC"]
+
+#get ip, industrial production from FRB 
+#rename naics_code naics
+frb_data.rename(columns={"naics_code": "naics"}, inplace=True)
+# ip = capcity_mn * utilization_mn
+frb_data["ip"] = (frb_data["capacity_mn"] * frb_data["utilization_mn"]) / 100 # correct for percent
+#Lip = lag of ip by naics and year
+frb_data["Lip"] = frb_data.groupby(["naics"])["ip"].shift(1)
+#Dln_ip = (ip - Lip)/Lip
+frb_data["Dln_ip"] = (frb_data["ip"] - frb_data["Lip"]) / frb_data["Lip"]
+
+
+# %% 
+# Analysis code 
+nds = NaicsDemandShocks(data_folder)
+shea_insts = nds._construct_shea_shocks()
+#rename naics3 naics
+shea_insts.rename(columns={"naics3": "naics"}, inplace=True)
+
+#merge all main datasets: exports_gdp_er, nber_ces, frb_data, shea_insts
+main_sample = pd.merge(
+    exports_gdp_er,
+    nber_ces,
+    on=["naics", "year"],
+    how="outer",
+    suffixes=("", "_nber"),
+)
+main_sample = pd.merge(
+    main_sample,
+    frb_data,
+    on=["naics", "year"],
+    how="outer",
+    suffixes=("", "_frb"),
+)
+main_sample = pd.merge(
+    main_sample,
+    shea_insts,
+    on=["naics", "year"],
+    how="outer",
+    suffixes=("", "_shea"),
+)
+
+#make lag utilization_dmn
+main_sample["Lutil_dm"] = main_sample.groupby(
+    ["naics"]
+)["utilization_dmn"].shift(1) / 100 # correct for percent
+
+#make Dln_Pip = Dln_ip - Dln_vprod
+main_sample["Dln_Pip"] = (
+    main_sample["Dln_vprod"] - main_sample["Dln_ip"] 
+).fillna(0)  # fill NaN with 0
+
+#make Dln_UVCip = Dln_VC - Dln_ip
+main_sample["Dln_UVCip"] = (main_sample["Dln_VC"] - main_sample["Dln_ip"])
+
+#make Dln_cap = (capacity_mn - L1.capacity_mn) / L1.capacity_mn
+main_sample["Dln_cap"] = (
+    main_sample["capacity_mn"] - main_sample.groupby(["naics"])["capacity_mn"].shift(1)
+) / main_sample.groupby(["naics"])["capacity_mn"].shift(1)
+
+#rename Dln_M_shea_inst2 to Dln_M_shea_inst, as in Boehm 2022
+main_sample.rename(columns={"Dln_M_shea_inst2": "Dln_M_shea_inst"}, inplace=True)
+
+#create copy: main_sample_BN
+main_sample_BN = main_sample.copy()
+#keep only [1973, 2011]
+main_sample_BN = main_sample_BN[
+    (main_sample_BN["year"] >= 1973) & (main_sample_BN["year"] <= 2011)
+]
+
+#Two key steps: winsorize all variables at p99 and p1, De-mean all variables entering interactions in sample
+#Variables: Dln_Pip Lutil_dm Dln_frgn_rgdp Dln_er Dln_M_shea_inst Dln_UVC Dln_ip Dln_cap
+#Winsorize all variables at p99 and p1
+def winsorize_series(series, lower_percentile=1, upper_percentile=99):
+    lower_bound = series.quantile(lower_percentile / 100)
+    upper_bound = series.quantile(upper_percentile / 100)
+    return series.clip(lower=lower_bound, upper=upper_bound)
+
+for col in [
+    "Dln_Pip",
+    "Lutil_dm",
+    "Dln_frgn_rgdp",
+    "Dln_er",
+    "Dln_M_shea_inst",
+    "Dln_UVCip",
+    "Dln_ip",
+    "Dln_cap",
+]:
+    main_sample_BN[col] = winsorize_series(main_sample[col])
+
+#For each variable: Dln_ip Dln_cap Lutil_dm Dln_frgn_rgdp Dln_M_shea_inst Dln_er, demean in full sample
+for col in [
+    "Dln_ip",
+    "Dln_cap",
+    "Lutil_dm",
+    "Dln_frgn_rgdp",
+    "Dln_M_shea_inst",
+    "Dln_er",
+]:
+    main_sample_BN[col] = main_sample[col].transform(
+        lambda x: x - x.mean()
+    ) 
+
+
+#export main_sample_BN to csv
+main_sample_BN.to_csv(
+    os.path.join(out_dir, "main_sample_BN.csv"), index=False
+)    
+
+#%% Perform the following Stata regression in python, using our functions
+		# ivreg2 Dln_Pip (Dln_ip c.Dln_ip#c.Lutil_dm = Dln_frgn_rgdp Dln_M_shea_inst Dln_er ///
+		# 	c.Dln_frgn_rgdp#c.Lutil_dm c.Dln_M_shea_inst#c.Lutil_dm c.Dln_er#c.Lutil_dm) ///
+		# 	Lutil_dm Dln_cap c.Dln_cap#c.Lutil_dm Dln_UVCip i.ind_gr i.year FE_year_*, dkraay(3) first partial(i.ind_gr i.year FE_year_*) 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# %% "Test drive" of functions 
+frb_data = load_frb_data(data_folder)
+exchange_rate_data = load_exchange_rate_data_forUN(data_folder)
+schott_exports = load_schott_exports(data_folder)
+#new: load_un_gdp_data 
+def load_un_gdp_data(data_folder):
+    file = os.path.join(
+        data_folder,
+        "raw",
+        "unstats",
+        "UNdata_GDP_constant2015LCU.csv"
+    )
+    df = pd.read_csv(file)
+    #keep if item == "GDP constant 2015 US$"
+    df = df[df["Item"] == "Gross Domestic Product (GDP)"]
+    #rename ("Country or Area" "Year" "Value") (Country Code, year, gdp)
+    df.rename(
+        columns={
+            "Country or Area": "country",
+            "Year": "year",
+            "Value": "gdp"
+        },
+        inplace=True
+    )
+    df["year"] = pd.to_numeric(df.year, errors="coerce")
+    df.dropna(subset=["year", "gdp"], inplace=True)
+    #czech republic, united kingdom, turkey: rename to merge with PWT (only pre-2000 OECD join matter), but keep orig names
+    df["tempcountry"] = df["country"].replace({
+        "Czechia": "Czech Republic",
+        "United Kingdom of Great Britain and Northern Ireland": "United Kingdom",
+        "Türkiye":  "Turkey"
+    })
+
+    country_codes = pd.read_stata(
+        os.path.join(data_folder, "raw", "pwt", "pwt100.dta")
+    )
+    #keep only countrycode and country in country_codes
+    country_codes = country_codes[["countrycode", "country"]]
+    country_codes.rename(columns={"country": "tempcountry"}, inplace=True)
+    country_codes.drop_duplicates(inplace=True)
+
+    df = df.merge(
+        country_codes, on="tempcountry", how="inner"
+    )
+
+    return df[["countrycode", "country", "year", "gdp"]]
+gdp_data = load_un_gdp_data(data_folder)
+
+# divide GDP by 1e6 to get GDP in millions
+gdp_data["gdp"] = gdp_data["gdp"] / 1e6  # GDP in millions
+#rename iso3_digit_alpha to country_abb 
+gdp_data.rename(columns={"countrycode": "country_abb"}, inplace=True)
+
+
+#%% Get "UN data"
+exports_gdp_er = pd.merge(
+    exchange_rate_data, gdp_data, on=["country", "year"], how="left"
+)
+#rename countries in UN data 
+exports_gdp_er["country"] = exports_gdp_er["country"].replace({ 
+        "Czechia": "Czech Republic",
+        "United Kingdom of Great Britain and Northern Ireland": "United Kingdom",
+        "Venezuela (Bolivarian Republic of)": "Venezuela",
+        "China (mainland)": "China", 
+        "Türkiye": "Turkey"
+    })
+
+#merge in exports data
+exports_gdp_er = exports_gdp_er[exports_gdp_er["country_abb"].notna()] 
+schott_exports = schott_exports[schott_exports["country_abb"].notna()]
+exports_gdp_er = pd.merge(
+    exports_gdp_er, schott_exports, on=["country_abb", "year"], how="inner"
+)
+
+#drop if year < 1972 --- this corrects minor error in Boehm 2022 who do <=, CAN UNCHECK TO MATCH THEIRS?
+exports_gdp_er["year"] = exports_gdp_er["year"].astype(int)
+exports_gdp_er = exports_gdp_er[exports_gdp_er["year"] > 1971]
+#drop if missing naics
+exports_gdp_er = exports_gdp_er[exports_gdp_er["naics"].notna()]
+#keep if naics starts with 3
+exports_gdp_er = exports_gdp_er[exports_gdp_er["naics"].str.startswith("3")]
+
+exports_gdp_er["Lrgdp_ncu"] = exports_gdp_er.groupby(
+    ["naics", "country_abb"]
+)["gdp"].shift(1)
+exports_gdp_er["Ler"] = exports_gdp_er.groupby(
+    ["naics", "country_abb"]
+)["exchange_rate"].shift(1)
+exports_gdp_er["Lexp_share"] = exports_gdp_er.groupby(
+    ["naics", "country_abb"]
+)["exp_share"].shift(1)
+#generate Dln_rgdp and Dln_er
+exports_gdp_er["Dln_rgdp"] = (
+    exports_gdp_er["gdp"] - exports_gdp_er["Lrgdp_ncu"]
+) / exports_gdp_er["Lrgdp_ncu"]
+exports_gdp_er["Dln_er"] = (
+    exports_gdp_er["exchange_rate"] - exports_gdp_er["Ler"]
+) / exports_gdp_er["Ler"]
+
+#generate exp_share times Dln_rgdp and Dln_er as kern_WID and kern_ER
+exports_gdp_er["kern_WID"] = (
+    exports_gdp_er["Lexp_share"] * exports_gdp_er["Dln_rgdp"]
+)
+exports_gdp_er["kern_ER"] = (
+    exports_gdp_er["Lexp_share"] * exports_gdp_er["Dln_er"]
+)
+
+#replace kern_WID = 0 if missing kern_WID, replace kern_ER = 0 if missing kern_ER
+exports_gdp_er["kern_WID"].fillna(0, inplace=True)
+exports_gdp_er["kern_ER"].fillna(0, inplace=True)
+
+#load data on when OECD joined, taken from Boehm (2022). (pre-post 2000)
+oecd_joined = pd.read_excel(
+    os.path.join(data_folder, "raw", "original", "boem_pandalai-nayar_2022", "empirics", "main analysis", "raw_data", "oecd_join.xls"), sheet_name="joined_OECD"
+)
+oecd_joined["country"] = oecd_joined["country"].replace({
+    "China, P.R.: Mainland": "China",
+    "Armenia, Republic of": "Armenia",
+    "Bahamas, The": "Bahamas",
+    "Bahrain, Kingdom of": "Bahrain",
+    "Bolivia": "Bolivia (Plurinational State of)",
+    "Korea, Republic of": "Republic of Korea",
+    "Slovak Republic": "Slovakia"
+})
+#merge oecd_joined with exports_gdp_er on country_abb and country
+exports_gdp_er = pd.merge(
+    exports_gdp_er, oecd_joined, on="country", how="left"
+)
+#keep if oecd_pre2000 == 1
+exports_gdp_er = exports_gdp_er[exports_gdp_er["oecd_pre2000"] == 1]  #OECD pre-2000 sample, what Boehm (2022) uses
+
+#collapse by naics_source and year, summing kern_WID and kern_ER
+exports_gdp_er = exports_gdp_er.groupby(
+    ["naics", "year"], as_index=False
+).agg({"kern_WID": "sum", "kern_ER": "sum", "Lexp_share": "sum"})
+
+#rename kern_WID and kern_ER Dln_frgn_rgdp and Dln_er
+exports_gdp_er.rename(
+    columns={"kern_WID": "Dln_frgn_rgdp", "kern_ER": "Dln_er"}, inplace=True
+) # these are the WID and ER instruments, respectively. Goes to 2022 only, I think load_schott_exports is the issue
+# we are using current USD, they are using constant NCU--I think their approach makes more sense, I changed it (seems to matter for numbers)
+
+
+
+# %% 
+# use NBER CES data, FRED for price index: change in value - change in prodn
+nber_ces = pd.read_csv(
+    os.path.join(data_folder, "raw", "nber-manufacturing-data", "nberces5818v1_n2012.csv")
+)
+#keep naics3 as first 3 digits of naics, where naics is numeric. within-naics lags still used
+nber_ces["naics3"] = nber_ces["naics"].astype(str).str[:3]
+nber_ces["Linvent"] = nber_ces.groupby(["naics"])["invent"].shift(1) 
+
+nber_ces["vprod"] = nber_ces["vship"] + nber_ces["invent"] - nber_ces["Linvent"]
+#get lag vprod
+nber_ces["Lvprod"] = nber_ces.groupby(["naics"])["vprod"].shift(1)
+
+nber_ces["vprod_tot"] = nber_ces.groupby(["naics3", "year"])["vprod"].transform("sum") #total w/in 3-dig naics
+nber_ces["lvprod_tot"] = nber_ces.groupby(["naics3", "year"])["Lvprod"].transform("sum") #total w/in 3-dig naics
+nber_ces["s_vprod"] = nber_ces["vprod"] / nber_ces["vprod_tot"]
+nber_ces["ls_vprod"] = nber_ces["Lvprod"] / nber_ces["lvprod_tot"]
+
+# gen Dln_piship = ln(piship) - ln(L.piship). ROUNDING DIFFS IN PISHIP (NOW 2012, BOEHM (2022) IS 1997) -> SMALL DIFFS
+nber_ces["Dln_piship"] = np.log(nber_ces["piship"]) - np.log(nber_ces.groupby(["naics"])["piship"].shift(1))
+
+nber_ces["Dln_piship_n3"] = (
+    0.5 * (nber_ces["s_vprod"] + nber_ces["ls_vprod"]) * nber_ces["Dln_piship"]
+)
+
+#collapse (sum) vprod, Lvprod by naics3 and year
+nber_ces = nber_ces.groupby(["naics3", "year"], as_index=False).agg(
+    {"vprod": "sum", "Lvprod": "sum", "Dln_piship_n3": "sum", "prodw": "sum", "matcost": "sum", "energy": "sum"}
+)
+#rename naics3 to naics
+nber_ces.rename(columns={"naics3": "naics"}, inplace=True)
+
+#Dln_vprod = (vprod - Lvprod)/Lvprod
+nber_ces["Dln_vprod"] = (nber_ces["vprod"] - nber_ces["Lvprod"]) / nber_ces["Lvprod"]
+
+#VC = prodw+matcost+energy
+nber_ces["VC"] = (nber_ces["prodw"] + nber_ces["matcost"] + nber_ces["energy"])
+nber_ces["Dln_VC"] = (
+    np.log(nber_ces["VC"]) - np.log(nber_ces.groupby(["naics"])["VC"].shift(1))
+)
+
+#get ip, industrial production from FRB 
+#rename naics_code naics
+frb_data.rename(columns={"naics_code": "naics"}, inplace=True)
+# ip = capcity_mn * utilization_mn
+frb_data["ip"] = (frb_data["capacity_mn"] * frb_data["utilization_mn"]) / 100 # correct for percent
+#Lip = lag of ip by naics and year
+frb_data["Lip"] = frb_data.groupby(["naics"])["ip"].shift(1)
+#Dln_ip = (ip - Lip)/Lip
+frb_data["Dln_ip"] = (frb_data["ip"] - frb_data["Lip"]) / frb_data["Lip"]
+
+
+# %% Get Shea insts 
+nds = NaicsDemandShocks(data_folder)
+shea_insts = nds._construct_shea_shocks()
+#rename naics3 naics
+shea_insts.rename(columns={"naics3": "naics"}, inplace=True)
+
+#%% merge all main datasets: exports_gdp_er, nber_ces, frb_data, shea_insts
+main_sample = pd.merge(
+    exports_gdp_er,
+    nber_ces,
+    on=["naics", "year"],
+    how="outer",
+    suffixes=("", "_nber"),
+)
+main_sample = pd.merge(
+    main_sample,
+    frb_data,
+    on=["naics", "year"],
+    how="outer",
+    suffixes=("", "_frb"),
+)
+main_sample = pd.merge(
+    main_sample,
+    shea_insts,
+    on=["naics", "year"],
+    how="outer",
+    suffixes=("", "_shea"),
+)
+
+#make lag utilization_dmn
+main_sample["Lutil_dm"] = main_sample.groupby(
+    ["naics"]
+)["utilization_dmn"].shift(1) / 100 # correct for percent
+
+#make Dln_Pip = Dln_ip - Dln_vprod
+main_sample["Dln_Pip"] = (
+    main_sample["Dln_vprod"] - main_sample["Dln_ip"] 
+).fillna(0)  # fill NaN with 0
+
+#make Dln_UVCip = Dln_VC - Dln_ip
+main_sample["Dln_UVCip"] = (main_sample["Dln_VC"] - main_sample["Dln_ip"])
+
+#make Dln_cap = (capacity_mn - L1.capacity_mn) / L1.capacity_mn
+main_sample["Dln_cap"] = (
+    main_sample["capacity_mn"] - main_sample.groupby(["naics"])["capacity_mn"].shift(1)
+) / main_sample.groupby(["naics"])["capacity_mn"].shift(1)
+
+#rename Dln_M_shea_inst2 to Dln_M_shea_inst, as in Boehm 2022
+main_sample.rename(columns={"Dln_M_shea_inst2": "Dln_M_shea_inst"}, inplace=True)
+
+#create copy: main_sample_BN
+main_sample_BN = main_sample.copy()
+#keep only [1973, 2011]
+main_sample_BN = main_sample_BN[
+    (main_sample_BN["year"] >= 1973) & (main_sample_BN["year"] <= 2011)
+]
+
+#%%
+#Two key steps: winsorize all variables at p99 and p1, De-mean all variables entering interactions in sample
+#Variables: Dln_Pip Lutil_dm Dln_frgn_rgdp Dln_er Dln_M_shea_inst Dln_UVC Dln_ip Dln_cap
+#Winsorize all variables at p99 and p1
+def winsorize_series(series, lower_percentile=1, upper_percentile=99):
+    lower_bound = series.quantile(lower_percentile / 100)
+    upper_bound = series.quantile(upper_percentile / 100)
+    return series.clip(lower=lower_bound, upper=upper_bound)
+
+for col in [
+    "Dln_Pip",
+    "Lutil_dm",
+    "Dln_frgn_rgdp",
+    "Dln_er",
+    "Dln_M_shea_inst",
+    "Dln_UVCip",
+    "Dln_ip",
+    "Dln_cap",
+]:
+    main_sample_BN[col] = winsorize_series(main_sample_BN[col])
+
+#For each variable: Dln_ip Dln_cap Lutil_dm Dln_frgn_rgdp Dln_M_shea_inst Dln_er, demean in full sample
+for col in [
+    "Dln_ip",
+    "Dln_cap",
+    "Lutil_dm",
+    "Dln_frgn_rgdp",
+    "Dln_M_shea_inst",
+    "Dln_er",
+]:
+    main_sample_BN[col] = main_sample_BN[col].transform(
+        lambda x: x - x.mean()
+    ) 
+
+
+#export main_sample_BN to csv
+main_sample_BN.to_csv(
+    os.path.join(out_dir, "main_sample_BN.csv"), index=False
+)    
 
 # %%

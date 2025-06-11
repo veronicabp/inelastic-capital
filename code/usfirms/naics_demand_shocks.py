@@ -1,3 +1,12 @@
+import pandas as pd
+import numpy as np
+import os
+
+import utils
+from utils import *
+reload(utils)
+
+
 def load_frb_data(data_folder):
     """
     Load data from the FRB on capacity and utilization rates
@@ -71,7 +80,7 @@ def load_schott_exports(data_folder):
 
     # get sic/naics concordance and weights
     sic_path = os.path.join(
-        data_folder, "raw", "original", "schott_2008", "conc_sic87_naics97.xlsx"
+        data_folder, "raw", "original", "schott_2008", "conc_sic87_naics97.xlsx" # no. 8 under https://sompks4.github.io/sub_data.html
     )
     sic_naics = pd.read_excel(sic_path, sheet_name="Data")
     sic_naics = sic_naics[["sic87", "naics97", "ship8797"]]

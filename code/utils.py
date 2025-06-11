@@ -180,7 +180,7 @@ def load_exchange_rate_data(data_folder):
     df = (
         df[["Country/Area", "Year", "exchange_rate"]]
         .copy()
-        .rename(columns={"Country/Area": "country_name", "Year": "year"})
+        .rename(columns={"Country/Area": "country", "Year": "year"})
     )
 
     country_mapping = {
@@ -217,20 +217,53 @@ def load_exchange_rate_data(data_folder):
     }
 
     # Assuming your dataframe is named df and the country column is named 'country'
-    df["country_name"] = df["country_name"].replace(country_mapping)
+    df["country"] = df["country"].replace(country_mapping)
 
     baci_country_codes = pd.read_csv(
         os.path.join(data_folder, "raw", "baci", "country_codes_V202301.csv")
     )
     df = df.merge(
         baci_country_codes,
-        left_on=["country_name"],
+        left_on=["country"],
         right_on=["country_name_full"],
         how="left",
         indicator=True,
     )
 
-    return df[["country_code", "year", "exchange_rate"]].copy()
+    return df[["country_code", "country", "year", "exchange_rate"]].copy()
+
+
+def load_exchange_rate_data_forUN(data_folder):
+    df = pd.read_csv(
+        os.path.join(
+            data_folder,
+            "raw",
+            "unstats",
+            "exchange_rates.csv",
+        )
+    )
+    # Convert AMA exchange rate to numeric
+    df["IMF based exchange rate"] = pd.to_numeric(df["IMF based exchange rate"], errors="coerce")
+    df["exchange_rate"] = 1 / df["IMF based exchange rate"]
+    df.dropna(subset=["exchange_rate"], inplace=True)
+    df = (
+        df[["Country/Area", "Year", "exchange_rate"]]
+        .copy()
+        .rename(columns={"Country/Area": "country", "Year": "year"})
+    )
+
+    baci_country_codes = pd.read_csv(
+        os.path.join(data_folder, "raw", "baci", "country_codes_V202301.csv")
+    )
+    df = df.merge(
+        baci_country_codes,
+        left_on=["country"],
+        right_on=["country_name_full"],
+        how="left",
+        indicator=True,
+    )
+
+    return df[["country_code", "country", "year", "exchange_rate"]].copy()   
 
 
 def get_naics_subcodes(df):
@@ -308,7 +341,7 @@ def load_naics_hs_crosswalk(data_folder):
 
 def load_iso_codes(data_folder):
     # 1) load census ISO‐numeric codes
-    iso_path = os.path.join(data_folder, "raw", "original", "iso_census.txt")
+    iso_path = os.path.join(data_folder, "raw", "crosswalks", "iso_census_raw25.txt")
     iso = (pd.read_csv(iso_path, sep="|", header=0))
     #rename "Code" column "isonumber", rename "Name" column "country"
     iso.columns = iso.columns.str.strip() 
@@ -979,7 +1012,7 @@ def split_whitespace_column(df, col, n):
 
 def load_iso_codes(data_folder):
     # 1) load census ISO‐numeric codes
-    iso_path = os.path.join(data_folder, "raw", "original", "iso_census.txt")
+    iso_path = os.path.join(data_folder, "raw", "crosswalks", "iso_census_raw25.txt")
     iso = pd.read_csv(iso_path, sep="|", header=0)
     # rename "Code" column "isonumber", rename "Name" column "country"
     iso.columns = iso.columns.str.strip()
@@ -989,7 +1022,7 @@ def load_iso_codes(data_folder):
     iso = iso[iso["isonumber"].str.len() <= 4]  # drop overly long codes
 
     # 2) load PWT country list
-    pwt_path = os.path.join(data_folder, "raw", "original", "pwt100.dta")
+    pwt_path = os.path.join(data_folder, "raw", "pwt", "pwt100.dta")
     pwt = pd.read_stata(pwt_path, columns=["countrycode", "country"])
     pwt["country"] = pwt["country"].str.strip()
     pwt = pwt.drop_duplicates(subset="country")
