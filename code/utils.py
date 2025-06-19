@@ -9,8 +9,11 @@ import re
 from itertools import product
 
 import statsmodels.api as sm
+
 from linearmodels.panel import PanelOLS
 from linearmodels.iv import IV2SLS
+from linearmodels.iv import Interaction, AbsorbingLS
+
 import pyfixest as pf
 from pyfixest import feols
 from scipy import stats
@@ -83,6 +86,221 @@ brics_codes = [
 ]
 
 country_codes = oecd_codes + brics_codes
+
+un_iso_map = {
+    "Afghanistan": "AFG",
+    "Albania": "ALB",
+    "Algeria": "DZA",
+    "Andorra": "AND",
+    "Angola": "AGO",
+    "Anguilla": "AIA",
+    "Antigua and Barbuda": "ATG",
+    "Argentina": "ARG",
+    "Armenia": "ARM",
+    "Aruba": "ABW",
+    "Australia": "AUS",
+    "Austria": "AUT",
+    "Azerbaijan": "AZE",
+    "Bahamas": "BHS",
+    "Bahrain": "BHR",
+    "Bangladesh": "BGD",
+    "Barbados": "BRB",
+    "Belarus": "BLR",
+    "Belgium": "BEL",
+    "Belize": "BLZ",
+    "Benin": "BEN",
+    "Bermuda": "BMU",
+    "Bhutan": "BTN",
+    "Bolivia (Plurinational State of)": "BOL",
+    "Bosnia and Herzegovina": "BIH",
+    "Botswana": "BWA",
+    "Brazil": "BRA",
+    "British Virgin Islands": "VGB",
+    "Brunei Darussalam": "BRN",
+    "Bulgaria": "BGR",
+    "Burkina Faso": "BFA",
+    "Burundi": "BDI",
+    "Cabo Verde": "CPV",
+    "Cambodia": "KHM",
+    "Cameroon": "CMR",
+    "Canada": "CAN",
+    "Cayman Islands": "CYM",
+    "Central African Republic": "CAF",
+    "Chad": "TCD",
+    "Chile": "CHL",
+    "China (mainland)": "CHN",
+    "China, Hong Kong SAR": "HKG",
+    "China, Macao Special Administrative Region": "MAC",
+    "Colombia": "COL",
+    "Comoros": "COM",
+    "Congo": "COG",
+    "Cook Islands": "COK",
+    "Costa Rica": "CRI",
+    "Croatia": "HRV",
+    "Cuba": "CUB",
+    "Curaçao": "CUW",
+    "Cyprus": "CYP",
+    "Czechia": "CZE",
+    "Côte d'Ivoire": "CIV",
+    "Democratic People's Republic of Korea": "PRK",
+    "Democratic Republic of the Congo": "COD",
+    "Denmark": "DNK",
+    "Djibouti": "DJI",
+    "Dominica": "DMA",
+    "Dominican Republic": "DOM",
+    "Ecuador": "ECU",
+    "Egypt": "EGY",
+    "El Salvador": "SLV",
+    "Equatorial Guinea": "GNQ",
+    "Eritrea": "ERI",
+    "Estonia": "EST",
+    "Ethiopia": "ETH",
+    "Fiji": "FJI",
+    "Finland": "FIN",
+    "France": "FRA",
+    "French Polynesia": "PYF",
+    "Gabon": "GAB",
+    "Gambia": "GMB",
+    "Georgia": "GEO",
+    "Germany": "DEU",
+    "Ghana": "GHA",
+    "Greece": "GRC",
+    "Greenland": "GRL",
+    "Grenada": "GRD",
+    "Guatemala": "GTM",
+    "Guinea": "GIN",
+    "Guinea-Bissau": "GNB",
+    "Guyana": "GUY",
+    "Haiti": "HTI",
+    "Honduras": "HND",
+    "Hungary": "HUN",
+    "Iceland": "ISL",
+    "India": "IND",
+    "Indonesia": "IDN",
+    "Iran, Islamic Republic of": "IRN",
+    "Iraq": "IRQ",
+    "Ireland": "IRL",
+    "Israel": "ISR",
+    "Italy": "ITA",
+    "Jamaica": "JAM",
+    "Japan": "JPN",
+    "Jordan": "JOR",
+    "Kazakhstan": "KAZ",
+    "Kenya": "KEN",
+    "Kingdom of Eswatini": "SWZ",
+    "Kiribati": "KIR",
+    "Kosovo": "XKX",
+    "Kuwait": "KWT",
+    "Kyrgyzstan": "KGZ",
+    "Lao People's Democratic Republic": "LAO",
+    "Latvia": "LVA",
+    "Lebanon": "LBN",
+    "Lesotho": "LSO",
+    "Liberia": "LBR",
+    "Libya": "LBY",
+    "Liechtenstein": "LIE",
+    "Lithuania": "LTU",
+    "Luxembourg": "LUX",
+    "Madagascar": "MDG",
+    "Malawi": "MWI",
+    "Malaysia": "MYS",
+    "Maldives": "MDV",
+    "Mali": "MLI",
+    "Malta": "MLT",
+    "Marshall Islands": "MHL",
+    "Mauritania": "MRT",
+    "Mauritius": "MUS",
+    "Mexico": "MEX",
+    "Micronesia (Federated States of)": "FSM",
+    "Monaco": "MCO",
+    "Mongolia": "MNG",
+    "Montenegro": "MNE",
+    "Montserrat": "MSR",
+    "Morocco": "MAR",
+    "Mozambique": "MOZ",
+    "Myanmar": "MMR",
+    "Namibia": "NAM",
+    "Nauru": "NRU",
+    "Nepal": "NPL",
+    "Netherlands": "NLD",
+    "New Caledonia": "NCL",
+    "New Zealand": "NZL",
+    "Nicaragua": "NIC",
+    "Niger": "NER",
+    "Nigeria": "NGA",
+    "Norway": "NOR",
+    "Oman": "OMN",
+    "Pakistan": "PAK",
+    "Palau": "PLW",
+    "Panama": "PAN",
+    "Papua New Guinea": "PNG",
+    "Paraguay": "PRY",
+    "Peru": "PER",
+    "Philippines": "PHL",
+    "Poland": "POL",
+    "Portugal": "PRT",
+    "Puerto Rico": "PRI",
+    "Qatar": "QAT",
+    "Republic of Korea": "KOR",
+    "Republic of Moldova": "MDA",
+    "Republic of North Macedonia": "MKD",
+    "Romania": "ROU",
+    "Russian Federation": "RUS",
+    "Rwanda": "RWA",
+    "Saint Kitts and Nevis": "KNA",
+    "Saint Lucia": "LCA",
+    "Saint Vincent and the Grenadines": "VCT",
+    "Samoa": "WSM",
+    "San Marino": "SMR",
+    "Sao Tome and Principe": "STP",
+    "Saudi Arabia": "SAU",
+    "Senegal": "SEN",
+    "Serbia": "SRB",
+    "Seychelles": "SYC",
+    "Sierra Leone": "SLE",
+    "Singapore": "SGP",
+    "Sint Maarten (Dutch part)": "SXM",
+    "Slovakia": "SVK",
+    "Slovenia": "SVN",
+    "Solomon Islands": "SLB",
+    "Somalia": "SOM",
+    "South Africa": "ZAF",
+    "South Sudan": "SSD",
+    "Spain": "ESP",
+    "Sri Lanka": "LKA",
+    "State of Palestine": "PSE",
+    "Sudan": "SDN",
+    "Suriname": "SUR",
+    "Sweden": "SWE",
+    "Switzerland": "CHE",
+    "Syrian Arab Republic": "SYR",
+    "Tajikistan": "TJK",
+    "Thailand": "THA",
+    "Timor-Leste": "TLS",
+    "Togo": "TGO",
+    "Tonga": "TON",
+    "Trinidad and Tobago": "TTO",
+    "Tunisia": "TUN",
+    "Turkmenistan": "TKM",
+    "Turks and Caicos Islands": "TCA",
+    "Tuvalu": "TUV",
+    "Türkiye": "TUR",
+    "Uganda": "UGA",
+    "Ukraine": "UKR",
+    "United Arab Emirates": "ARE",
+    "United Kingdom of Great Britain and Northern Ireland": "GBR",
+    "United Republic of Tanzania: Mainland": "TZA",
+    "United Republic of Tanzania: Zanzibar": "TZA",
+    "United States": "USA",
+    "Uruguay": "URY",
+    "Uzbekistan": "UZB",
+    "Vanuatu": "VUT",
+    "Venezuela (Bolivarian Republic of)": "VEN",
+    "Viet Nam": "VNM",
+    "Yemen": "YEM",
+    "Zambia": "ZMB",
+    "Zimbabwe": "ZWE",
+}
 
 
 ###### Functions to load data
@@ -321,7 +539,8 @@ def get_lag(df, group_cols, shift_col="value", shift_amt=1):
         pd.DataFrame: The DataFrame with the new 'L_value' column.
     """
     # Create a copy of the relevant columns
-    df_prev = df[group_cols + [shift_col]].copy()
+    cols = list(set(group_cols + [shift_col] + ["year"]))
+    df_prev = df[cols].copy()
 
     # Increment the year by 1 to align previous year's value with current year
     df_prev["year"] += shift_amt
@@ -335,7 +554,7 @@ def get_lag(df, group_cols, shift_col="value", shift_amt=1):
     df_prev.rename(columns={f"{shift_col}": f"{prefix}{shift_col}"}, inplace=True)
 
     # Merge the original DataFrame with the shifted DataFrame on 'importer' and 'year'
-    df_merged = df.merge(df_prev, on=group_cols, how="left")
+    df_merged = df.merge(df_prev, on=list(set(group_cols + ["year"])), how="left")
 
     return df_merged
 
@@ -837,7 +1056,7 @@ def split_whitespace_column(df, col, n):
 
 def load_iso_codes(data_folder):
     # 1) load census ISO‐numeric codes
-    iso_path = os.path.join(data_folder, "raw", "original", "iso_census.txt")
+    iso_path = os.path.join(data_folder, "raw", "iso", "iso_census.txt")
     iso = pd.read_csv(iso_path, sep="|", header=0)
     # rename "Code" column "isonumber", rename "Name" column "country"
     iso.columns = iso.columns.str.strip()
@@ -847,7 +1066,7 @@ def load_iso_codes(data_folder):
     iso = iso[iso["isonumber"].str.len() <= 4]  # drop overly long codes
 
     # 2) load PWT country list
-    pwt_path = os.path.join(data_folder, "raw", "original", "pwt100.dta")
+    pwt_path = os.path.join(data_folder, "raw", "pwt", "pwt100.dta")
     pwt = pd.read_stata(pwt_path, columns=["countrycode", "country"])
     pwt["country"] = pwt["country"].str.strip()
     pwt = pwt.drop_duplicates(subset="country")
@@ -955,9 +1174,11 @@ def load_iso_codes(data_folder):
     df = df[df["countrycode"].notna() & (df["countrycode"] != "")]
 
     # 7) final rename
-    df = df.rename(columns={"countrycode": "wbcode"})
+    df = df.rename(columns={"countrycode": "country_code"})
 
-    return df[["country", "wbcode", "isonumber"]]
+    df["isonumber"] = df["isonumber"].astype(int)
+
+    return df[["country", "country_code", "isonumber"]]
 
 
 # %%

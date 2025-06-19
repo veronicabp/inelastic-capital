@@ -568,7 +568,7 @@ def construct_shea_indicators(data_folder, shea_threshold=3):
     return shea_full, clean_shares(sales_shares)
 
 
-def clean_shares(df):
+def clean_shares(df, lag=1):
     df = df[df["naics_source"].str.startswith("3") | (df["naics_source"] == "GFG")]
     df = df.drop(columns=["total_output", "shipments"])
 
@@ -605,27 +605,256 @@ def clean_shares(df):
     # Collapse (sum) by group
     agg = df.groupby(["naics_source", "dest", "year"], as_index=False)["sales_sh"].sum()
     agg = agg.rename(columns={"sales_sh": "Lsales_sh"})
-    agg["year"] += 1
+    agg["year"] += lag
 
     return agg
 
 
+def naics_import_shares(data_folder):
+    conc = pd.read_excel(
+        os.path.join(
+            data_folder, "raw", "original", "schott_2008", "conc_sic87_naics97.xlsx"
+        )
+    )
+    conc = conc[["sic87", "naics97", "ship8797"]]
+    conc["sic"] = conc["sic87"].astype(int)
+    conc = conc.drop(columns="sic87")
+
+    # Trade data from 1972 to 1988
+    trade = pd.read_stata(
+        os.path.join(
+            data_folder,
+            "raw",
+            "original",
+            "schott_2008",
+            "xm_sic87_72_105_20120424.dta",
+        )
+    )
+    trade = trade[trade["x"] != 0][["wbcode", "year", "sic", "x"]].copy()
+    trade = trade.rename(columns={"x": "val_exports"})
+    trade["sic"] = trade["sic"].astype(int)
+    trade = trade[trade["year"] <= 1988]
+    trade = trade.merge(conc, how="left", on="sic")
+
+    # allocate to NAICS6 via ship8797 weights
+    trade["val_exports"] = trade["val_exports"] * trade["ship8797"]
+    trade["naics"] = trade["naics97"].astype(str)
+    trade["naics3"] = trade["naics"].str[:3]
+    exp7288 = trade.groupby(["year", "naics3", "wbcode"], as_index=False)[
+        "val_exports"
+    ].sum()
+    exp7288 = exp7288.rename(columns={"wbcode": "country_code"})
+
+    # Trade data from 1989 to 2024
+    frames = []
+    for i in tqdm(range(1989, 2025)):
+        path = os.path.join(
+            data_folder,
+            "raw",
+            "original",
+            "schott_2008",
+            "annual",
+            f"exp_detl_{i}_12n.dta",
+        )
+        df = pd.read_stata(path)
+        df = df[["year", "all_val_yr", "naics", "cty_code"]]
+        df["naics3"] = df["naics"].astype(str).str[:3]
+        df = df.rename(columns={"all_val_yr": "val_exports", "cty_code": "isonumber"})
+        df = df.groupby(["naics3", "year", "isonumber"], as_index=False)[
+            "val_exports"
+        ].sum()
+        frames.append(df[["isonumber", "year", "naics3", "val_exports"]])
+
+    exp8924 = pd.concat(frames, ignore_index=True)
+    exp8924["isonumber"] = exp8924["isonumber"].astype(int)
+    exp8924 = exp8924[exp8924["naics3"] != ""].copy()
+    exp8924 = exp8924[exp8924["naics3"] != "."].copy()
+
+    iso_codes = pd.read_csv(os.path.join(data_folder, "raw", "iso", "iso_vbp.csv"))
+    exp8924 = exp8924.merge(
+        iso_codes[["iso3", "isonumber"]],
+        how="inner",
+        on="isonumber",
+    )
+
+    exp8924 = exp8924.rename(columns={"iso3": "country_code"})
+    exp8924 = exp8924[["year", "naics3", "country_code", "val_exports"]].copy()
+
+    # convert 1972–88 data from millions to dollars
+    exp7288["val_exports"] *= 1_000_000
+
+    combined = pd.concat([exp7288, exp8924], ignore_index=True)
+    combined = combined.rename(
+        columns={
+            "val_exports": "exports",
+            "country_code": "importer",
+        }
+    )
+    # drop invalid rows
+    combined = combined[combined["naics3"] != ""].copy()
+    combined = combined[combined["naics3"] != "."].copy()
+    combined = combined.dropna(subset=["naics3", "importer", "exports", "year"])
+    combined = combined.sort_values(["naics3", "importer", "year"])
+
+    # compute total exports by NAICS3‐year
+    tot = (
+        combined.groupby(["naics3", "year"], as_index=False)["exports"]
+        .sum()
+        .rename(columns={"exports": "tot_exp"})
+    )
+    combined = combined.merge(tot, on=["naics3", "year"], how="left")
+    combined["exp_share"] = combined["exports"] / combined["tot_exp"]
+
+    return combined[["naics3", "year", "importer", "exp_share"]].copy()
+
+
+def keep_oecd(df, data_folder):
+    boem_sample = pd.read_stata(
+        os.path.join(
+            data_folder,
+            "raw",
+            "original",
+            "boem_pandalai-nayar_2022/empirics/main analysis/temp_files/country_names.dta",
+        )
+    ).rename(columns={"country_abb": "iso"})
+    df = df.merge(boem_sample, on="iso", how="inner")
+
+    oecd_sample = pd.read_stata(
+        os.path.join(
+            data_folder,
+            "raw",
+            "original",
+            "boem_pandalai-nayar_2022/empirics/main analysis/temp_files/oecd_join.dta",
+        )
+    )
+    df = df.merge(oecd_sample, on="country", how="inner")
+    df = df[df.oecd_pre2000 == 1].copy()
+    df = df.drop(columns=["oecd_pre2000", "oecd_post2000", "country"])
+    return df
+
+
+def load_un_gdp(data_folder):
+    path = os.path.join(data_folder, "raw", "unstats", "un_rgdp_natcurr.csv")
+    df = pd.read_csv(path)
+    df = df.rename(
+        columns={
+            "Country/Area": "country",
+            "Year": "year",
+            "GDP, at constant 2015 prices - National currency": "rgdp",
+        }
+    )
+    df["rgdp"] = pd.to_numeric(df["rgdp"], errors="coerce")
+    df = df.dropna(subset=["country", "year", "rgdp"])
+    df["iso"] = df.country.apply(lambda x: un_iso_map[x])
+
+    df = df.groupby(["iso", "year"], as_index=False)["rgdp"].sum()
+
+    # Keep countries in OECD
+    df = keep_oecd(df, data_folder)
+
+    return df
+
+
+def load_un_er(data_folder):
+    df = pd.read_csv(
+        os.path.join(data_folder, "raw", "unstats", "un_nomexchangerates_usd.csv")
+    )
+    df = df.rename(
+        columns={
+            "Country/Area": "country",
+            "Year": "year",
+            "IMF based exchange rate": "er",
+        }
+    )
+    df["er"] = pd.to_numeric(df["er"], errors="coerce")
+    df["er"] = 1 / df["er"]
+    df["iso"] = df.country.apply(lambda x: un_iso_map[x] if x in un_iso_map else np.nan)
+    df = df.dropna(subset=["iso", "year", "er"])
+    df = df.groupby(["iso", "year"], as_index=False)["er"].mean()
+
+    # Keep countries in OECD
+    df = keep_oecd(df, data_folder)
+
+    return df
+
+
 class NaicsDemandShocks:
-    def __init__(self, data_folder):
+    def __init__(self, data_folder, lag=1, shea_threshold=3):
         self.data_folder = data_folder
+        self.lag = lag
+
+        self.demand_shares, self.cost_shares, self.sales_shares = construct_bea_shares(
+            data_folder
+        )
+        self.shea_indicators, self.sales_shares = construct_shea_indicators(
+            self.data_folder, shea_threshold
+        )
+
+        self.instruments = [
+            "Dln_frgn_rgdp",
+            "Dln_er",
+            # "Dln_M_shea_inst1",
+            "Dln_M_shea_inst2",
+            # "Dln_M_shea_inst1_min",
+            # "Dln_M_shea_inst2_min",
+        ]
+        self.dependent_vars = ["Dln_Pip"]
+        self.endog_vars = ["Dln_ip"]
+        self.exog_vars = ["Dln_capacity", "Dln_UVCip"]
 
     # Private methods
-    def _construct_gdp_shocks(self):
+    def _construct_trade_shocks(self):
         """
-        Constructs trade shocks for naics level using gdp data
+        Constructs trade shocks for naics level using gdp and er data
         """
-        # TODO
 
-    def _construct_exchange_rate_shocks(self):
-        """
-        Constructs trade shocks for naics level using exchange rate data
-        """
-        # TODO
+        ############ Load GDP data ############
+        gdp = load_un_gdp(self.data_folder)
+        gdp = gdp.rename(columns={"iso": "importer"})
+
+        # Construct growth rates
+        gdp.sort_values(["importer", "year"], inplace=True)
+        gdp = get_lag(
+            gdp, group_cols=["importer"], shift_col="rgdp", shift_amt=self.lag
+        )
+        gdp["d_log_rgdp"] = np.log(gdp["rgdp"]) - np.log(gdp[f"L{self.lag}_rgdp"])
+        # gdp["d_log_rgdp"] = (gdp["rgdp"] - gdp[f"L{self.lag}_rgdp"]) / gdp[
+        #     f"L{self.lag}_rgdp"
+        # ]
+
+        ############ Load exchange rate data ############
+        er = load_un_er(self.data_folder)
+        er = er.rename(columns={"iso": "importer"})
+        er.sort_values(["importer", "year"], inplace=True)
+        er = get_lag(er, group_cols=["importer"], shift_col="er", shift_amt=self.lag)
+        er["d_log_er"] = np.log(er["er"]) - np.log(er[f"L{self.lag}_er"])
+        # er["d_log_er"] = (er["er"] - er[f"L{self.lag}_er"]) / er[f"L{self.lag}_er"]
+
+        ############ Load export shares ############
+        shares = naics_import_shares(self.data_folder)
+        shares = shares[shares.naics3.str.startswith("3")].copy()
+        shares["year"] += self.lag
+        shares.rename(columns={"exp_share": "Lexp_share"}, inplace=True)
+
+        # Merge in share of sales going to exports and scale by this
+        exp_shares = self.sales_shares[self.sales_shares["dest"] == "exports"].copy()
+        exp_shares = exp_shares.rename(columns={"naics_source": "naics3"})
+        shares = shares.merge(exp_shares, on=["naics3", "year"], how="inner")
+        shares["Lexp_share"] = shares["Lexp_share"] * shares["Lsales_sh"]
+
+        ############ Merge ############
+        df = gdp.merge(er, on=["importer", "year"], how="outer")
+        df = df.merge(shares, on=["importer", "year"])
+        df["Dln_frgn_rgdp"] = df["Lexp_share"] * df["d_log_rgdp"]
+        df["Dln_er"] = df["Lexp_share"] * df["d_log_er"]
+        df = (
+            df.groupby(["naics3", "year"], as_index=False)[
+                ["Dln_frgn_rgdp", "Dln_er", "Lexp_share"]
+            ]
+            .sum()
+            .reset_index()
+        )
+        return df[["naics3", "year", "Dln_frgn_rgdp", "Dln_er", "Lexp_share"]]
 
     def _construct_shea_shocks(self, shea_threshold=3):
         """
@@ -644,9 +873,7 @@ class NaicsDemandShocks:
         df = df.drop(columns=["price_index", "qty_index"]).copy()
 
         # Load SHEA data
-        shea_indicators, sales_shares = construct_shea_indicators(
-            self.data_folder, shea_threshold
-        )
+        shea_indicators, sales_shares = self.shea_indicators, self.sales_shares
 
         df = df.merge(sales_shares, on=["dest", "year"], how="inner")
         df = df.merge(
@@ -705,7 +932,9 @@ class NaicsDemandShocks:
         ces["s_lvprod"] = ces["L_vprod"] / ces.groupby(["naics3", "year"])[
             "L_vprod"
         ].transform("sum")
-        ces["Dln_piship"] = ces["Dln_piship"] * (ces["s_vprod"] + ces["s_lvprod"]) / 2
+
+        for col in ["Dln_piship", "piship", "piinv", "pimat"]:
+            ces[col] = ces[col] * (ces["s_vprod"] + ces["s_lvprod"]) / 2
 
         ces["VC"] = ces[["prodw", "matcost", "energy"]].sum(axis=1)
 
@@ -715,7 +944,17 @@ class NaicsDemandShocks:
             vship=("vship", "sum"),
             invent=("invent", "sum"),
             VC=("VC", "sum"),
+            invest=("invest", "sum"),
+            cap=("cap", "sum"),
+            emp=("emp", "sum"),
+            pay=("pay", "sum"),
+            prodw=("prodw", "sum"),
+            piship=("piship", "sum"),
+            piinv=("piinv", "sum"),
+            pimat=("pimat", "sum"),
         )
+
+        ces.rename(columns={"cap": "capital"}, inplace=True)
 
         ces.loc[ces["vprod"] == 0, "vprod"] = np.nan
 
@@ -741,6 +980,13 @@ class NaicsDemandShocks:
         frb = frb[frb["naics"].str.len() == 3].copy()
         frb = frb.rename(columns={"naics": "naics3"})
         frb = frb.sort_values(["naics3", "year"])
+        frb.rename(columns={"cap": "capacity"}, inplace=True)
+
+        # Rescale util
+        frb["util"] = frb["util"] / 100
+
+        # Get lag of utilization rate
+        frb = get_lag(frb, group_cols=["naics3"], shift_col="util", shift_amt=self.lag)
 
         df = ces.merge(
             frb,
@@ -748,25 +994,81 @@ class NaicsDemandShocks:
             how="inner",
         )
 
-        for col in ["ip", "util", "cap", "VC"]:
-            df[f"Dln_{col}"] = np.log(df[col]) - np.log(
-                df.groupby("naics3")[col].shift(1)
-            )
+        for col in ["ip", "util", "capital", "capacity", "VC", "invest", "emp"]:
+            df[f"ln_{col}"] = np.log(df[col])
+            df.loc[df[col] <= 0, f"ln_{col}"] = np.nan  # Avoid log(0) or log(negative)
+            df[f"Dln_{col}"] = df[f"ln_{col}"] - df.groupby("naics3")[
+                f"ln_{col}"
+            ].shift(1)
 
         df["Dln_Pip"] = df["Dln_vprod"] - df["Dln_ip"]
         df["Dln_UVCip"] = df["Dln_VC"] - df["Dln_ip"]
+
+        return df
 
     # Public methods
     def initialize_data(self):
         """
         Construct full data
         """
-        gdp_shocks = self._construct_gdp_shocks()
-        exchange_rate_shocks = self._construct_exchange_rate_shocks()
+        trade_shocks = self._construct_trade_shocks()
         shea_shocks = self._construct_shea_shocks()
         naics_data = self._compile_naics_data()
-        # TODO: merge all and construct df
-        # self.data = df
+
+        # Merge all
+        df = naics_data.merge(trade_shocks, on=["naics3", "year"], how="left").merge(
+            shea_shocks, on=["naics3", "year"], how="left"
+        )
+
+        # Keep sample where instruments are non missing
+        df = df[df.year >= 1973].copy()
+
+        # Construct FEs interacted with export shares
+        for year in sorted(df["year"].unique()):
+            df[f"exp_sh_{year}"] = df["Lexp_share"] * (df["year"] == year).astype(int)
+
+        df = df.set_index(["naics3", "year"])
+        self.data_nowin = df.copy()
+
+        # Winsorize all variables at 1% and 99%
+        for col in (
+            self.dependent_vars + self.endog_vars + self.exog_vars + self.instruments
+        ):
+            ub = df[col].quantile(0.99)
+            lb = df[col].quantile(0.01)
+            df[col] = np.where(df[col] > ub, ub, df[col])
+            df[col] = np.where(df[col] < lb, lb, df[col])
+
+        # Demean utilization rate
+        df["util_dm"] = df["L1_util"] - df.groupby(["naics3"])["L1_util"].transform(
+            "mean"
+        )
+
+        # Interact utilization rate with endogenous variables
+        df["util_bin"] = 1
+        df.loc[df["util_dm"] > df["util_dm"].quantile(0.15), "util_bin"] = 2
+        df.loc[df["util_dm"] > df["util_dm"].quantile(0.50), "util_bin"] = 3
+        df.loc[df["util_dm"] > df["util_dm"].quantile(0.85), "util_bin"] = 4
+        df["util_bin"] = df["util_bin"].astype("category")
+
+        # Make dummy variables for utilization rate bins
+        for level in sorted(df.util_bin.unique())[1:]:
+            df[f"ub{level}"] = (df["util_bin"] == level).astype(int)
+
+        for col in (
+            self.dependent_vars + self.endog_vars + self.exog_vars + self.instruments
+        ):
+            for level in df.util_bin.unique():
+                df[f"{col}_ub{level}"] = df[col] * (df["util_bin"] == level).astype(int)
+
+        # De-mean all variables
+        for col in (
+            self.dependent_vars + self.endog_vars + self.exog_vars + self.instruments
+        ):
+
+            df[f"{col}_dm"] = df[col] - df.groupby("year")[col].transform("mean")
+
+        self.data = df
 
     def run_regressions(self):
         """
