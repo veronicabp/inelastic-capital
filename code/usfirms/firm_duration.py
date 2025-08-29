@@ -2,10 +2,11 @@ from utils import *
 import utils
 
 
-def estimate_industry_duration(data_folder, weight_col="MV"):
+def estimate_industry_duration(data_folder, weight_col="MV", level="HS4"):
+    folder = os.path.join(data_folder, "raw", "original", "mian-sufi-roll")
 
     # Load monetary policy shocks
-    mp_shocks = pd.read_stata(f"{klms_folder}/proc/master_fomc_level_24.dta")
+    mp_shocks = pd.read_stata(f"{folder}/master_fomc_level_24.dta")
     mp_shocks = (
         mp_shocks[mp_shocks.unscheduled_meetings == 0][["daten", "mp_klms_U"]]
         .copy()
@@ -13,7 +14,7 @@ def estimate_industry_duration(data_folder, weight_col="MV"):
     )
 
     # Load firm data
-    df = pd.read_stata(f"{klms_folder}/proc/master_firm_level_24.dta")
+    df = pd.read_stata(f"{folder}/master_firm_level_24.dta")
     df = (
         df[["permno", "daten", "shock_hf_30min", "MV"]]
         .copy()
@@ -23,23 +24,40 @@ def estimate_industry_duration(data_folder, weight_col="MV"):
     df = df.merge(mp_shocks, on="date", how="inner")
 
     # Merge with product codes
-    firm_hscodes = pd.read_csv(os.path.join(data_folder, "working", "firm_hscodes.csv"))
-    firm_hscodes["HS4_codes"] = firm_hscodes["HS4_codes"].str.findall(r"\d+")
-    firm_hscodes = firm_hscodes.explode("HS4_codes")
-    firm_hscodes.dropna(subset=["HS4_codes"], inplace=True)
-    df = df.merge(
-        firm_hscodes[["permno", "HS4_codes"]],
-        on="permno",
-        how="inner",
-    )
+    if level == "HS4":
+        firm_hscodes = pd.read_csv(
+            os.path.join(data_folder, "working", "firm_hscodes.csv")
+        )
+        firm_hscodes["HS4"] = firm_hscodes["HS4"].str.findall(r"\d+")
+        firm_hscodes = firm_hscodes.explode("HS4")
+        firm_hscodes.dropna(subset=["HS4"], inplace=True)
+        df = df.merge(
+            firm_hscodes[["permno", "HS4"]],
+            on="permno",
+            how="inner",
+        )
+    elif level == "naics3":
+        firm_naics = pd.read_csv(f"{data_folder}/raw/wrds/CRSP_firm_descriptions.csv")
+        firm_naics["naics3"] = firm_naics["naics"].astype(str).apply(lambda x: x[:3])
+        firm_naics = firm_naics.rename(columns={"LPERMNO": "permno"})
+        firm_naics = firm_naics[["permno", "naics3"]].drop_duplicates()
+        df = df.merge(firm_naics[["permno", "naics3"]], on="permno", how="inner")
 
-    df = df.set_index(["permno", "date"])
+    else:
+        raise ValueError(f"Level {level} not supported")
+
+    codes = df[level].unique()
     coef = []
     se = []
 
-    hs_codes = df.HS4_codes.unique()
-    for code in tqdm(hs_codes):
-        df_sub = df[df.HS4_codes == code]
+    # De-mean variables
+
+    for var in ["shock_hf_30min"]:
+        model = feols(f"{var} ~ 1 | date", data=df, weights=weight_col)
+        df[f"{var}_dm"] = model.resid()
+
+    for code in tqdm(codes):
+        df_sub = df[df[level] == code].set_index(["permno", "date"])
 
         if len(df_sub) < 5:
             coef.append(np.nan)
@@ -48,8 +66,8 @@ def estimate_industry_duration(data_folder, weight_col="MV"):
 
         model = utils.panel_reg(
             df_sub,
-            f"shock_hf_30min",
-            f"mp_klms_U",
+            dep_var="shock_hf_30min_dm",
+            ind_vars=["mp_klms_U"],
             time_fe=False,
             group_fe=False,
             weight_col=weight_col,
@@ -60,12 +78,12 @@ def estimate_industry_duration(data_folder, weight_col="MV"):
 
     output = pd.DataFrame(
         {
-            "HS4": hs_codes,
+            level: codes,
             "beta": coef,
             "beta_var": np.array(se) ** 2,
         }
     )
-    output.to_csv(f"{data_folder}/working/HS4_duration.csv", index=False)
+    output.to_csv(f"{data_folder}/working/{level}_duration.csv", index=False)
     return output
 
 

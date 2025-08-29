@@ -82,12 +82,81 @@ baci_us_exports = baci[baci["exporter"] == 842].copy()
 # fd.duration_elas_regressions(data_folder, results_HS4)
 
 # %%
+NDS = nds.NaicsDemandShocks(data_folder)
+NDS.initialize_data()
 
-#################
-self = nds.NaicsDemandShocks(data_folder)
-self.initialize_data()
-df = self.data.copy()
+
+# %%
+self = NDS
+df = self.data.copy().reset_index()
 df_nowin = self.data_nowin.copy()
+
+# %%
+# Elasticity estimate
+model = iv_panel_reg(
+    df,
+    dep_var="Dln_Pip",
+    exog=["Dln_capacity", "Dln_UVCip", "L1_util"]
+    + [f"exp_sh_{year}" for year in sorted(df.year.unique())],
+    endog=["Dln_ip"],
+    instruments=["Dln_M_shea_inst2", "Dln_frgn_rgdp", "Dln_er"],
+)
+
+# %% Interact price elasticity with investment at time of shock
+shocks = ["Dln_M_shea_inst2", "Dln_frgn_rgdp", "Dln_er"]
+for shock in shocks:
+    df[f"{shock}_x_Dln_invest"] = df[shock] * df["Dln_invest"]
+
+# %%
+for f in range(1, 4):
+    print(f"Forward lag {f}")
+    print("-" * 100)
+    df = get_lag(df, group_cols=["naics3"], shift_col="ln_Pip", shift_amt=-f)
+
+    m = regfe(
+        df,
+        dep_var=f"F{f}_ln_Pip",
+        ind_vars=shocks
+        + [f"{shock}_x_Dln_invest" for shock in shocks]
+        + [f"exp_sh_{year}" for year in sorted(df.year.unique())],
+        fe_vars=["year", "naics3"],
+    )
+
+    for shock in shocks:
+        shock_interact = f"{shock}_x_Dln_invest"
+        shock_coef = m.coef()[shock]
+        shock_se = m.se()[shock]
+        shock_interact_coef = m.coef()[shock_interact]
+        shock_interact_se = m.se()[shock_interact]
+
+        print(f"{shock}: {shock_coef:.3f} ({shock_se:.3f})")
+        print(f"{shock_interact}: {shock_interact_coef:.3f} ({shock_interact_se:.3f})")
+        print("\n")
+# %%
+for f in range(1, 4):
+    print(f"Forward lag {f}")
+    print("-" * 100)
+    df = get_lag(df, group_cols=["naics3"], shift_col="Dln_Pip", shift_amt=-f)
+
+    m = regfe(
+        df,
+        dep_var=f"F{f}_Dln_Pip",
+        ind_vars=shocks
+        + [f"{shock}_x_Dln_invest" for shock in shocks]
+        + [f"exp_sh_{year}" for year in sorted(df.year.unique())],
+        fe_vars=["year", "naics3"],
+    )
+
+    for shock in shocks:
+        shock_interact = f"{shock}_x_Dln_invest"
+        shock_coef = m.coef()[shock]
+        shock_se = m.se()[shock]
+        shock_interact_coef = m.coef()[shock_interact]
+        shock_interact_se = m.se()[shock_interact]
+
+        print(f"{shock}: {shock_coef:.3f} ({shock_se:.3f})")
+        print(f"{shock_interact}: {shock_interact_coef:.3f} ({shock_interact_se:.3f})")
+        print("\n")
 
 # %%
 model = iv_panel_reg(
@@ -242,5 +311,6 @@ ax.set_ylabel("Investment As Share of Capital Stock")
 ax.legend(title="Naics3", bbox_to_anchor=(1.05, 1), loc="upper left")
 plt.tight_layout()
 plt.show()
+
 
 # %%

@@ -542,14 +542,17 @@ def get_lag(df, group_cols, shift_col="value", shift_amt=1):
     cols = list(set(group_cols + [shift_col] + ["year"]))
     df_prev = df[cols].copy()
 
-    # Increment the year by 1 to align previous year's value with current year
-    df_prev["year"] += shift_amt
-
     # Rename the column so it doesn't clash with the original 'value'
     if shift_amt < 0:
         prefix = f"F{-shift_amt}_"
     else:
         prefix = f"L{shift_amt}_"
+
+    if f"{prefix}{shift_col}" in df.columns:
+        df.drop(columns=[f"{prefix}{shift_col}"], inplace=True)
+
+    # Increment the year by 1 to align previous year's value with current year
+    df_prev["year"] += shift_amt
 
     df_prev.rename(columns={f"{shift_col}": f"{prefix}{shift_col}"}, inplace=True)
 

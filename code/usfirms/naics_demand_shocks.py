@@ -1,4 +1,71 @@
+from tkinter import S
+from pandas.io.stata import Self
 from utils import *
+import utils
+
+
+def construct_naics_returns(self):
+    df = pd.read_csv(
+        f"{self.data_folder}/raw/wrds/CRSP_monthly_prices.csv",
+    )
+    df.columns = df.columns.str.lower()
+    df["date"] = pd.to_datetime(df["date"], format="%Y-%m-%d")
+    df = df.rename(columns={"mthprc": "prc", "mthretx": "retx"})
+
+    # Drop non-positive price
+    df = df.drop(df[df["prc"] <= 0].index)
+
+    # Drop missing
+    df["retx"] = pd.to_numeric(df["retx"], errors="coerce")
+    df = df.dropna(subset=["prc", "retx"])
+    df["log_retx"] = np.log(1 + df["retx"])
+
+    # Drop duplicates
+    df = df.drop_duplicates(subset=["permno", "date"]).sort_values(
+        by=["permno", "date"]
+    )
+
+    # Load naics codes from CCM
+    ccm = pd.read_csv(f"{self.data_folder}/raw/wrds/CRSP_CCM_link.csv")
+    ccm = ccm.rename(columns={"LPERMNO": "permno"})
+    ccm = ccm.dropna(subset=["naics"])
+    ccm = ccm.drop_duplicates(subset=["permno"])
+    df = df.merge(
+        ccm[["permno", "naics"]], on="permno", how="inner", suffixes=("_crsp", "")
+    )
+
+    df["MV"] = df["prc"] * df["shrout"] / 1e6
+
+    # Annualize returns
+    df["log_retx"] = df["log_retx"] * 12
+
+    # Get average return by naics, weighted by MV
+    df["year"] = df["date"].dt.year
+    df["naics3"] = df["naics"].astype(int).astype(str).str[:3]
+    df = df.drop(df[df.naics3.str.len() != 3].index)
+
+    grouped_df = (
+        df.groupby(["naics3", "year"], as_index=False)
+        .apply(lambda x: weighted_mean(x, col="log_retx", weight_column="MV"))
+        .rename(columns={None: "log_retx"})
+    )
+
+    # Fill missing years with 0
+    naics = grouped_df.naics3.unique()
+    years = list(range(grouped_df.year.min(), grouped_df.year.max() + 1))
+    full_years = pd.DataFrame(
+        {
+            "naics3": [n for n in naics for _ in years],
+            "year": years * len(naics),
+        }
+    )
+    grouped_df = grouped_df.merge(full_years, on=["naics3", "year"], how="outer")
+    grouped_df["log_retx"] = grouped_df["log_retx"].fillna(0)
+
+    # Cumulate returns
+    grouped_df["cum_retx"] = grouped_df.groupby("naics3")["log_retx"].cumsum()
+
+    return grouped_df
 
 
 def load_frb_data(data_folder):
@@ -1004,6 +1071,14 @@ class NaicsDemandShocks:
         df["Dln_Pip"] = df["Dln_vprod"] - df["Dln_ip"]
         df["Dln_UVCip"] = df["Dln_VC"] - df["Dln_ip"]
 
+        # Construct price index that is 1 in first year using Dln_Pip
+        df = df.sort_values(["naics3", "year"])
+
+        # Pip starts at 1 for the first observed year in each group
+        df["Pip"] = np.exp(df["Dln_Pip"].fillna(0)).groupby(df["naics3"]).cumprod()
+
+        df["ln_Pip"] = np.log(df["Pip"])
+
         return df
 
     # Public methods
@@ -1069,6 +1144,70 @@ class NaicsDemandShocks:
             df[f"{col}_dm"] = df[col] - df.groupby("year")[col].transform("mean")
 
         self.data = df
+
+    def construct_elas(self):
+
+        df = self.data.copy().reset_index()
+
+        codes = df.naics3.unique()
+        shocks = [f"{shock}_dm" for shock in self.instruments]
+        outcomes = ["Dln_Pip", "Dln_ip", "Dln_invest", "Dln_capital"]
+
+        # De-mean outcomes
+        for outcome in outcomes:
+            if not f"{outcome}_dm" in df.columns:
+                df[f"{outcome}_dm"] = df[outcome] - df.groupby("year")[
+                    outcome
+                ].transform("mean")
+
+        # Run regressions
+        data = {"naics3": codes}
+        for outcome in outcomes:
+            coef = ([], [], [])
+            se = ([], [], [])
+            for code in codes:
+                df_sub = df[df.naics3 == code].set_index(["naics3", "year"])
+                model = utils.panel_reg(
+                    df_sub,
+                    dep_var=f"{outcome}_dm",
+                    ind_vars=shocks,
+                    time_fe=False,
+                    group_fe=False,
+                )
+
+                for i, shock in enumerate(shocks):
+                    coef[i].append(model.params[shock])
+                    se[i].append(model.std_errors[shock])
+
+            for i, shock in enumerate(shocks):
+                data[f"gamma_{outcome}_elas{i}"] = np.array(coef[i])
+                data[f"gamma_{outcome}_var{i}"] = np.array(se[i]) ** 2
+
+        output = pd.DataFrame(data)
+        output.to_csv(
+            os.path.join(self.data_folder, "working", "naics_elas.csv"), index=False
+        )
+        return output
+
+    def correlate_with_betas(self):
+        df = self.data.reset_index()
+        betas = pd.read_csv(f"{self.data_folder}/working/naics3_duration.csv")
+        betas["naics3"] = betas["naics3"].apply(lambda x: f"{int(x):03d}")
+        df = df.merge(betas, on="naics3", how="inner")
+
+        for outcome in ["Dln_Pip", "Dln_ip", "Dln_invest", "Dln_capital"]:
+            model = pf.feols(
+                f'{outcome} ~ (Dln_frgn_rgdp + Dln_er + Dln_M_shea_inst2) * beta + Dln_capacity + Dln_UVCip + {"+".join([f"exp_sh_{year}" for year in sorted(df.year.unique())])} | year + naics3',
+                data=df,
+            )
+            print(outcome)
+            print("-" * 100)
+            for shock in self.instruments:
+                print(f"{shock}: {model.coef()[shock]:.3f} ({model.se()[shock]:.3f})")
+                print(
+                    f"{shock} x beta: {model.coef()[f'{shock}:beta']:.3f} ({model.se()[f'{shock}:beta']:.3f})"
+                )
+            print("\n\n")
 
     def run_regressions(self):
         """
