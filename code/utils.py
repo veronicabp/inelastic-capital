@@ -3,6 +3,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import pickle
 
+import geopandas as gpd
+
 import os
 import re
 
@@ -26,6 +28,8 @@ import json
 from tqdm import tqdm
 
 tqdm.pandas()
+
+from typing import Optional, Tuple, List, Dict
 
 from importlib import reload
 
@@ -662,66 +666,13 @@ def newey_west_cov(X, resid, lags=1):
     return XTX_inv @ S @ XTX_inv
 
 
-def panel_reg(
-    data,
-    dep_var,
-    ind_vars=[],
-    time_fe=True,
-    group_fe=True,
-    robust=True,
-    newey=False,
-    cluster=None,
-    weight_col=None,
-    newey_lags=1,
-):
-
-    # Optionally include weights if provided
-    if weight_col is not None:
-        weights = data[weight_col]
-    else:
-        weights = None
-
-    # Create the exogenous variables (adding a constant)
-    exog = sm.add_constant(data[ind_vars])
-
-    # Set up the PanelOLS model, with both entity and time fixed effects if requested.
-    model = PanelOLS(
-        data[dep_var],
-        exog,
-        weights=weights,
-        entity_effects=group_fe,
-        time_effects=time_fe,
-    )
-
-    # Set standard errors based on parameters
-    kwargs = {}
-    if newey:
-        # Use a kernel covariance estimator (Bartlett kernel) for Newey–West style errors.
-        kwargs["cov_type"] = "kernel"
-        kwargs["kernel"] = "bartlett"
-        kwargs["bandwidth"] = newey_lags
-    elif cluster is not None:
-        # Cluster the standard errors on the specified variable.
-        kwargs["cov_type"] = "clustered"
-        kwargs["clusters"] = data[cluster]
-    elif robust:
-        # Use robust (heteroskedasticity-consistent) standard errors.
-        kwargs["cov_type"] = "robust"
-    else:
-        kwargs["cov_type"] = "unadjusted"
-
-    results = model.fit(**kwargs)
-    return results
-
-
 def iv_panel_reg(
     df,
     dep_var,
     exog=[],
     endog=[],
     instruments=[],
-    time_fe=True,
-    group_fe=True,
+    fes=[],
     robust=True,
     newey=False,
     cluster=None,
@@ -730,20 +681,35 @@ def iv_panel_reg(
 ):
     data = df.copy()
 
+    # Drop missing
+    cols = [dep_var] + exog + endog + instruments + fes
+    if weight_col is not None:
+        cols.append(weight_col)
+    if cluster is not None:
+        cols.append(cluster)
+
+    data = data.dropna(subset=cols)
+
+    # Construct dummies for fixed effects
+    dummy_cols = []
+    for fe_col in fes:
+        # Create dummy variables for this fixed effect, dropping the first category
+        dummies = pd.get_dummies(data[fe_col], prefix=fe_col, drop_first=True)
+        # Add the dummy columns to the data
+        data = pd.concat([data, dummies], axis=1)
+        # Store the names of the dummy columns
+        dummy_cols.extend(dummies.columns.tolist())
+
     # Optionally include weights if provided
     if weight_col is not None:
         weights = data[weight_col]
     else:
         weights = None
 
-    # De-mean before, since IV module cannot accept fixed effects
-    for col in [dep_var] + exog + endog + instruments:
-        data[col] = demean(data, col, time_fe=time_fe, group_fe=group_fe)
-
     # Run IV
     model = IV2SLS(
         dependent=data[dep_var],
-        exog=sm.add_constant(data[exog]),
+        exog=sm.add_constant(data[exog + dummy_cols]),
         endog=data[endog],
         instruments=data[instruments],
         weights=weights,
@@ -771,17 +737,36 @@ def iv_panel_reg(
 
 
 def panel_reg(
-    data,
+    df,
     dep_var,
     ind_vars=[],
-    time_fe=True,
-    group_fe=True,
+    fes=[],
     robust=True,
     newey=False,
     cluster=None,
     weight_col=None,
     newey_lags=1,
 ):
+    data = df.copy()
+
+    # Drop missing
+    cols = [dep_var] + ind_vars + fes
+    if weight_col is not None:
+        cols.append(weight_col)
+    if cluster is not None:
+        cols.append(cluster)
+
+    data = data.dropna(subset=cols)
+
+    # Construct dummies for fixed effects
+    dummy_cols = []
+    for fe_col in fes:
+        # Create dummy variables for this fixed effect, dropping the first category
+        dummies = pd.get_dummies(data[fe_col], prefix=fe_col, drop_first=True)
+        # Add the dummy columns to the data
+        data = pd.concat([data, dummies], axis=1)
+        # Store the names of the dummy columns
+        dummy_cols.extend(dummies.columns.tolist())
 
     # Optionally include weights if provided
     if weight_col is not None:
@@ -789,17 +774,20 @@ def panel_reg(
     else:
         weights = None
 
-    # Create the exogenous variables (adding a constant)
-    exog = sm.add_constant(data[ind_vars])
-
-    # Set up the PanelOLS model, with both entity and time fixed effects if requested.
-    model = PanelOLS(
-        data[dep_var],
-        exog,
-        weights=weights,
-        entity_effects=group_fe,
-        time_effects=time_fe,
-    )
+    # Run IV
+    if weights is not None:
+        model = sm.WLS(
+            data[dep_var],
+            sm.add_constant(data[ind_vars + dummy_cols]),
+            weights=weights,
+            missing="drop",
+        )
+    else:
+        model = sm.OLS(
+            data[dep_var],
+            sm.add_constant(data[ind_vars + dummy_cols]),
+            missing="drop",
+        )
 
     # Set standard errors based on parameters
     kwargs = {}
@@ -819,86 +807,6 @@ def panel_reg(
         kwargs["cov_type"] = "unadjusted"
 
     results = model.fit(**kwargs)
-    return results
-
-
-def regfe(
-    data,
-    dep_var,
-    ind_vars=None,
-    fe_vars=None,
-    robust=True,
-    newey=False,
-    cluster=None,  # can be str or list of str
-    cluster_type="CRV1",  # 'CRV1' or 'CRV3'
-    vcov_extra=None,
-    weight_col=None,
-    verbose=False,
-):
-    """
-    Run a fixed effects regression using the pyfixest package.
-
-    Parameters:
-        data (pd.DataFrame): DataFrame containing the data.
-        dep_var (str): Name of the dependent variable.
-        ind_vars (list of str, optional): List of independent variable names.
-            If None, the model will include only fixed effects (and a constant).
-        fe_vars (str or list of str, optional): Fixed effect variable(s) to be absorbed.
-        robust (bool): If True, compute heteroskedasticity-robust standard errors
-            (only used if neither `cluster` nor `vcov_extra` is provided).
-        cluster (str or list of str, optional): Variable(s) for cluster-robust SEs.
-            Overrides `robust` if present (and if `vcov_extra` is None).
-        cluster_type (str): Either "CRV1" (classic) or "CRV3" (small sample correction).
-        vcov_extra (dict or str, optional): If provided, overrides `robust` and `cluster`.
-        weights (str or pd.Series, optional): Weights for the regression.
-
-    Returns:
-        results: The fitted regression results object from pyfixest.
-    """
-
-    # Build the base formula for the independent variables.
-    if ind_vars:
-        base_formula = f"{dep_var} ~ " + " + ".join(ind_vars)
-    else:
-        base_formula = f"{dep_var} ~ 1"  # model with constant only
-
-    # Append fixed effects if provided.
-    if fe_vars:
-        if isinstance(fe_vars, str):
-            fe_vars = [fe_vars]
-        fe_string = " + ".join(fe_vars)
-        formula = base_formula + " | " + fe_string
-    else:
-        formula = base_formula
-
-    if verbose:
-        print("Using formula:", formula)
-
-    # Determine the vcov option
-    if vcov_extra is not None:
-        # highest priority
-        vcov_option = vcov_extra
-    elif cluster is not None:
-        # Use either CRV1 or CRV3
-        vcov_option = {cluster_type: " + ".join(cluster)}
-    elif robust:
-        # heteroskedasticity-robust
-        vcov_option = "hetero"
-    else:
-        # classical (iid) errors
-        vcov_option = None
-
-    # Build the keyword arguments to pass to feols.
-    kwargs = {}
-    if vcov_option is not None:
-        kwargs["vcov"] = vcov_option
-
-    if weight_col is not None:
-        kwargs["weights"] = weight_col
-
-    # Run the regression
-    results = feols(formula, data=data, **kwargs)
-
     return results
 
 
